@@ -20,9 +20,31 @@ const LURE_ACTION_LABELS = {
 };
 
 const AVERAGE_TIME_MATCH_CACHE = new Map();
+const FORMULA_LAST_UPDATED = "2026-05-07 16:30";
+const FISHING_TICK_SECONDS = 60;
+const FISHING_TICKS_PER_HOUR = 3600 / FISHING_TICK_SECONDS;
+const ENCOUNTER_FISHING_INTERVAL_BITE_RATE_MULTIPLIER = 1;
+const WAITING_BITE_STEP_SECONDS = 900;
+const WAITING_BITE_MULTIPLIER_CAP = 16;
+const LINE_CUT_LINE_OUT_LIMIT_MAX_M = 2000;
+const SIM_OWNED_SHIP_REGION_ID = "sim_owned_ship_exclusive";
 const GROUNDBAIT_MAX_AMOUNT = 3000;
 const GROUNDBAIT_DECAY_SECONDS = 7200;
 const GROUNDBAIT_MAX_MULTIPLIER = 3;
+const RATING_MULTIPLIERS = Object.freeze({
+  below: 0.2,
+  standard: 1,
+  rare: 2,
+  epic: 5,
+  legendary: 10,
+});
+const EXPECTED_RATING_MULTIPLIER =
+  0.38 * RATING_MULTIPLIERS.below +
+  0.52 * RATING_MULTIPLIERS.standard +
+  0.085 * RATING_MULTIPLIERS.rare +
+  0.0145 * RATING_MULTIPLIERS.epic +
+  0.0005 * RATING_MULTIPLIERS.legendary;
+const EXPECTED_WEIGHT_SAMPLE_COUNT = 64;
 const DATA = normalizeGameData(window.LAZYFISHER_GAME_DATA);
 
 
@@ -35,6 +57,7 @@ function normalizeGameData(raw) {
       source: "official",
       version: raw.version || "unknown",
       extractedAt: "2026-05-07",
+      formulaLastUpdated: FORMULA_LAST_UPDATED,
     },
     regions: (raw.regions || []).map(normalizeRegion),
     weatherPresets: (raw.weather_presets || []).map(normalizeWeatherPreset),
@@ -52,9 +75,43 @@ function normalizeGameData(raw) {
     tackleBundles: raw.tackle_bundles || [],
   };
 
+  normalized.regions.push(...simulatorVirtualRegions(raw));
   normalized.regions = normalized.regions.filter((region) => region.fishPool.length);
   normalized.fish = normalized.fish.filter((item) => item.id && item.name);
   return normalized;
+}
+
+function simulatorVirtualRegions(raw) {
+  const ownedShipFish = (raw.fish || [])
+    .filter((fish) =>
+      Array.isArray(fish.owned_ship_route_regions) &&
+      fish.owned_ship_route_regions.filter(Boolean).length > 0 &&
+      (!Array.isArray(fish.regions) || fish.regions.length === 0))
+    .sort((a, b) =>
+      b.owned_ship_route_regions.length - a.owned_ship_route_regions.length ||
+      (b.weight_max_kg ?? 0) - (a.weight_max_kg ?? 0) ||
+      String(a.id).localeCompare(String(b.id)));
+  if (!ownedShipFish.length) return [];
+
+  return [normalizeRegion({
+    id: SIM_OWNED_SHIP_REGION_ID,
+    name: "模拟器·自有船",
+    description: "仅供模拟器使用的自有船专属鱼池，汇总正式公开鱼池外的远航专属巨物。",
+    water_type: "saltwater",
+    depth_min: 12,
+    depth_max: 40,
+    fishing_mode: "boat",
+    scene_type: "boat",
+    recommended_styles: ["bottom_rod", "lure_rod"],
+    fish_pool: ownedShipFish.map((fish) => ({
+      fish_id: fish.id,
+      base_ratio: 1,
+      size_modifier: 1,
+    })),
+    spots: [],
+    environment_baseline: { wind: 4.1, cloud: 4.2, rain: 0, water_flow: 2.1 },
+    simulator_virtual: "owned_ship_exclusive",
+  })];
 }
 
 function normalizeRegion(item) {
@@ -73,6 +130,7 @@ function normalizeRegion(item) {
     castOffset: item.cast_expectation_offset ?? 0,
     noticeMultiplier: item.notice_multiplier ?? 1,
     softLimitKg: item.soft_limit_kg ?? null,
+    simulatorVirtual: item.simulator_virtual || null,
     recommendedStyles: item.recommended_styles || [],
     spots: spots.length ? spots : [defaultSpot()],
     environment: {
@@ -135,7 +193,7 @@ function normalizeFish(item) {
     migration: item.migration_habit || "resident",
     biteHours: item.bite_hours || [],
     offshorePreference: item.offshore_preference,
-    baseValue: rarityBaseValue(item),
+    baseValue: fishValuePerKg(item),
   };
 }
 
@@ -269,6 +327,12 @@ function normalizeTip(item) {
 
 function averageRange(range, fallback) {
   return Array.isArray(range) && range.length >= 2 ? (Number(range[0]) + Number(range[1])) / 2 : fallback;
+}
+
+function fishValuePerKg(item) {
+  const officialValue = item.base_value_per_kg ?? item.value_per_kg ?? item.sell_value_per_kg ?? item.base_price_per_kg;
+  if (Number.isFinite(officialValue) && officialValue > 0) return officialValue;
+  return rarityBaseValue(item);
 }
 
 function rarityBaseValue(item) {
@@ -457,10 +521,17 @@ function groundbaitMultiplier(config, presentation, fishObj, elapsedSeconds = 0,
 }
 
 function averageGroundbaitMultiplier(amount, hours) {
-  const ticks = Math.max(1, Math.round(hours * 60));
+  const ticks = fishingTicksForHours(hours, true);
   let total = 0;
-  for (let tick = 0; tick < ticks; tick += 1) total += groundbaitMultiplierFromAmount(amount - (GROUNDBAIT_MAX_AMOUNT / GROUNDBAIT_DECAY_SECONDS) * tick * 60);
+  for (let tick = 0; tick < ticks; tick += 1) {
+    total += groundbaitMultiplierFromAmount(amount - (GROUNDBAIT_MAX_AMOUNT / GROUNDBAIT_DECAY_SECONDS) * tick * FISHING_TICK_SECONDS);
+  }
   return total / ticks;
+}
+
+function fishingTicksForHours(hours, rounded = false) {
+  const ticks = Math.max(1, Number(hours || 0) * FISHING_TICKS_PER_HOUR);
+  return rounded ? Math.round(ticks) : ticks;
 }
 
 function groundbaitMultiplierFromAmount(amount) {
@@ -708,7 +779,7 @@ function getLoadoutItems(loadout) {
 }
 
 function getControls() {
-  const lineCutLineOutLimitM = clamp(Number(els.lineCut.value), 0, 500);
+  const lineCutLineOutLimitM = clamp(Number(els.lineCut.value), 0, LINE_CUT_LINE_OUT_LIMIT_MAX_M);
   return defaultControls({
     throwDistance: clamp(Number(els.cast.value), 0, 120),
     floatLengthCm: clamp(Number(els.float.value), 0, 3000),
@@ -806,6 +877,7 @@ function buildPresentation(loadout, controls, region, env, level) {
   const detectionScore = biteDetectionScore(rodType, items, targetDepth, floatLinePenalty);
   const hookPower = hookPowerScore(rodType, items, controls, reelPower, ctrl, detectionScore, lureBase.retrieveBase);
   const snagRate = snagChance({ rodType, targetDepth, actualCast, idealRodDistance, reachFactor, ctrl, durabilityFactor, env, region, items, lureBase, controls, hook });
+  const tackleSafety = tackleSafetyProfile(items, controls);
 
   return {
     items,
@@ -836,6 +908,7 @@ function buildPresentation(loadout, controls, region, env, level) {
     lureBase,
     payload,
     snagRate,
+    tackleSafety,
   };
 }
 
@@ -1132,17 +1205,49 @@ function preferenceMatch(presentation, fishObj) {
 function reelingSuccessRate(presentation, fishObj, poolEntry, env) {
   const items = presentation.items;
   const meanWeight = avg([fishObj.weightMin, fishObj.weightMax]) * (poolEntry?.sizeModifier ?? 1);
-  const leaderTension = items.leader?.maxTension ?? Infinity;
-  const tackleTension = Math.min(items.rod.maxTension, items.line.maxTension, items.hook.maxTension, leaderTension);
-  const reelDrag = items.reel ? items.reel.frictionMax * clamp(presentation.controls.dragRatio || 0.45, 0.15, 0.95) : 0.8;
   const fishLoad = Math.max(0.2, meanWeight * (0.72 + 0.24 * fishObj.strength + 0.12 * fishObj.endurance));
-  const strengthScore = clamp((tackleTension + 0.55 * reelDrag) / Math.max(0.3, fishLoad * 1.3), 0, 1.35);
+  const safety = tackleSafetyProfile(items, presentation.controls);
+  const appliedTension = items.reel ? Math.min(fishLoad, Math.max(safety.dragTension, 0.05)) : fishLoad;
+  const stressRatio = appliedTension / Math.max(safety.weakTension, 0.1);
+  const dragToWeakRatio = safety.dragTension / Math.max(safety.weakTension, 0.1);
+  const overloadRisk = clamp((stressRatio - 0.88) / 0.42);
+  const lockedDragRisk = items.reel ? clamp((dragToWeakRatio - 0.92) / 0.5) * clamp(fishLoad / Math.max(safety.weakTension, 0.1)) : 0;
+  const safetyPenalty = clamp(0.75 * overloadRisk + 0.25 * lockedDragRisk);
+  const usableDrag = items.reel ? Math.min(Math.max(safety.dragTension, 0.05), safety.weakTension) : safety.weakTension;
+  const strengthScore = clamp((safety.weakTension + 0.55 * usableDrag) / Math.max(0.3, fishLoad * 1.3), 0, 1.35);
   const staminaScore = clamp(0.34 + 0.32 * softcap(presentation.skills.endurance, 8) + 0.18 * softcap(presentation.skills.strength, 9) + 0.16 * presentation.ctrl);
   const lineReserve = clamp(items.line.length / Math.max(8, presentation.actualCast + presentation.targetDepth + items.rod.length));
   const weatherPenalty = 0.06 * clamp(env.wind / 8) + 0.04 * clamp(env.waterFlow / 2.5);
   const lineCutLineOutLimitM = presentation.controls.lineCutLineOutLimitM ?? presentation.controls.lineCutOut ?? 0;
   const cutPenalty = lineCutLineOutLimitM > 0 && presentation.actualCast > lineCutLineOutLimitM ? 0.14 : 0;
-  return clamp(0.08 + 0.42 * strengthScore + 0.18 * staminaScore + 0.14 * lineReserve + 0.12 * presentation.reelPower + 0.06 * presentation.hookPower - weatherPenalty - cutPenalty, 0.04, 0.98);
+  return clamp(0.08 + 0.42 * strengthScore + 0.18 * staminaScore + 0.14 * lineReserve + 0.12 * presentation.reelPower + 0.06 * presentation.hookPower - weatherPenalty - cutPenalty - 0.52 * safetyPenalty, 0.02, 0.98);
+}
+
+function tackleSafetyProfile(items, controls) {
+  const capacities = [
+    { part: "rod", tension: tensionCapacity(items.rod, items.rod?.maxTension) },
+    { part: "line", tension: tensionCapacity(items.line, items.line?.maxTension) },
+    { part: "hook", tension: tensionCapacity(items.hook, items.hook?.maxTension) },
+  ];
+  if (items.leader) capacities.push({ part: "leader", tension: tensionCapacity(items.leader, items.leader.maxTension) });
+  if (items.reel) capacities.push({ part: "reel", tension: tensionCapacity(items.reel, 1.5 * items.reel.frictionMax) });
+
+  const weakPoint = capacities
+    .filter((row) => Number.isFinite(row.tension) && row.tension > 0)
+    .reduce((weak, row) => (row.tension < weak.tension ? row : weak), { part: "unknown", tension: Infinity });
+  const weakTension = Number.isFinite(weakPoint.tension) ? weakPoint.tension : 1;
+  const dragTension = items.reel ? items.reel.frictionMax * clamp(Number(controls.dragRatio), 0, 1) : 0;
+  return {
+    weakPart: weakPoint.part,
+    weakTension,
+    dragTension,
+    dragToWeakRatio: dragTension / Math.max(weakTension, 0.1),
+  };
+}
+
+function tensionCapacity(item, baseTension) {
+  if (!item || !Number.isFinite(baseTension)) return Infinity;
+  return baseTension * Math.max((item.durability ?? 100) / 100, 0.1);
 }
 
 function candidateWeights(presentation, region, env, level) {
@@ -1161,7 +1266,7 @@ function candidateWeights(presentation, region, env, level) {
   if (!total) return { encounterRate: 0, entries: [] };
   const averageDist = base.reduce((sum, row) => sum + row.weight * row.dist.redistribution, 0) / Math.max(total, 1e-6);
   const regionBonus = 1 + 0.25 * clamp(Number(els.proficiency.value) / 100);
-  const encounterRate = clamp(0.35 * 1 * regionBonus * total);
+  const encounterRate = clamp(0.35 * ENCOUNTER_FISHING_INTERVAL_BITE_RATE_MULTIPLIER * regionBonus * total);
   const adjusted = base.map((row) => ({
     ...row,
     adjustedWeight: row.weight * clamp(1 + 0.9 * (row.dist.redistribution - averageDist), 0.82, 1.18),
@@ -1177,7 +1282,7 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
   const presentation = buildPresentation(loadout, controls, region, env, level);
   if (!presentation) return null;
   const weights = candidateWeights(presentation, region, env, level);
-  const ticks = Math.max(1, hours * 60);
+  const ticks = fishingTicksForHours(hours);
   let catchPerTick = 0;
   let bitePerTick = 0;
   let noticePerTick = 0;
@@ -1195,6 +1300,7 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     noticePerTick += pNotice;
     fishRows.push({
       fish: row.fish,
+      entry: row.entry,
       catch: pCatch * ticks,
       bite: pBite * ticks,
       notice: pNotice * ticks,
@@ -1208,7 +1314,7 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
   const expectedCatch = catchPerTick * ticks;
   const expectedBites = bitePerTick * ticks;
   const expectedNotices = noticePerTick * ticks + falseSignalRate * ticks;
-  const catchPerHour = catchPerTick * 60;
+  const catchPerHour = catchPerTick * FISHING_TICKS_PER_HOUR;
   return {
     presentation,
     weights,
@@ -1431,7 +1537,7 @@ function controlVariants(rodType, region, loadout) {
       0.82 * region.depthMax * 100,
     ].map((depth) => Math.round(clamp(depth, 35, 3000) / 10) * 10));
     const casts = uniqueNumbers([0, castOffset + 5, castOffset + 8, region.depthMin + 7].map((distance) => roundNumber(Math.max(0, distance), 1)));
-    const drags = rodType === "hand_rod" ? [0] : [0.42, 0.5, 0.7, 0.85, 0.95];
+    const drags = dragRatioCandidates(rodType, loadout, [0.42, 0.5, 0.7, 0.85, 0.95]);
     return depths.flatMap((floatLengthCm) => casts.flatMap((throwDistance) => drags.map((dragRatio) => ({
       ...base,
       throwDistance,
@@ -1442,7 +1548,7 @@ function controlVariants(rodType, region, loadout) {
   }
   if (rodType === "bottom_rod") {
     const casts = uniqueNumbers([0, 0.9 * region.depthMax + 4, 1.35 * region.depthMax + 4, 1.8 * region.depthMax + 4].map((distance) => roundNumber(Math.max(0, distance), 1)));
-    const drags = [0.42, 0.55, 0.7, 0.85, 0.95];
+    const drags = dragRatioCandidates(rodType, loadout, [0.42, 0.55, 0.7, 0.85, 0.95]);
     const speeds = [0.6, 0.8, 1, 1.2];
     return casts.flatMap((throwDistance) => drags.flatMap((dragRatio) => speeds.map((reelSpeed) => ({
       ...base,
@@ -1455,7 +1561,7 @@ function controlVariants(rodType, region, loadout) {
   const actions = ["auto", "steady_surface", "steady_mid", "bottom_hop", "mid_twitch"];
   const casts = uniqueNumbers([0, castOffset + 3, castOffset + 8, 1.2 * region.depthMax + 4].map((distance) => roundNumber(Math.max(0, distance), 1)));
   const speeds = uniqueNumbers([lureItem?.lureType === "jig" ? 0.85 : 1.35, 0.85, 1.35, 1.45]);
-  const drags = [0.45, 0.7, 0.85, 0.95];
+  const drags = dragRatioCandidates(rodType, loadout, [0.45, 0.7, 0.85, 0.95]);
   return casts.flatMap((throwDistance) => actions.flatMap((lureAction) => speeds.flatMap((reelSpeed) => drags.map((dragRatio) => ({
     ...base,
     throwDistance,
@@ -1463,6 +1569,16 @@ function controlVariants(rodType, region, loadout) {
     dragRatio,
     reelSpeed,
   })))));
+}
+
+function dragRatioCandidates(rodType, loadout, fallback) {
+  if (rodType === "hand_rod") return [0];
+  const items = getLoadoutItems(loadout);
+  if (!items.reel || !Number.isFinite(items.reel.frictionMax) || items.reel.frictionMax <= 0) return uniqueNumbers(fallback);
+  const safeRatio = tackleSafetyProfile(items, { dragRatio: 0 }).weakTension / items.reel.frictionMax;
+  const dynamic = [0.55, 0.72, 0.86, 0.98, 1.08]
+    .map((scale) => roundNumber(clamp(safeRatio * scale, 0.05, 0.98), 3));
+  return uniqueNumbers([...dynamic, ...fallback]).sort((a, b) => a - b);
 }
 
 function uniqueNumbers(values) {
@@ -1679,7 +1795,7 @@ function normalizeImportedControls(raw) {
     ["line_cut_line_out_limit_m", "line_cut_out", "line_cutout", "lineCutLineOutLimitM", "lineCutOut"],
     state.controls.lineCutLineOutLimitM ?? state.controls.lineCutOut,
     0,
-    500,
+    LINE_CUT_LINE_OUT_LIMIT_MAX_M,
   );
   return defaultControls({
     throwDistance: controlNumber(raw, ["throw_distance", "throwDistance"], state.controls.throwDistance, 0, 120),
@@ -1760,7 +1876,7 @@ function renderTabs() {
 function simulate(loadout, controls, region, env, level, hours, groundbaitConfig = currentGroundbaitConfig(loadout, region)) {
   const presentation = buildPresentation(loadout, controls, region, env, level);
   if (!presentation) return null;
-  const ticks = Math.max(1, Math.round(hours * 60));
+  const ticks = fishingTicksForHours(hours, true);
   const stats = {
     catches: 0,
     bites: 0,
@@ -1774,7 +1890,7 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
   };
   let waitSeconds = 0;
   for (let tick = 0; tick < ticks; tick += 1) {
-    const waitMultiplier = Math.min(2 ** Math.floor(waitSeconds / 900), 16);
+    const waitMultiplier = Math.min(2 ** Math.floor(waitSeconds / WAITING_BITE_STEP_SECONDS), WAITING_BITE_MULTIPLIER_CAP);
     if (Math.random() < presentation.snagRate * 0.08) stats.snagEvents += 1;
     const weights = candidateWeights(presentation, region, env, level);
     if (Math.random() >= weights.encounterRate) {
@@ -1783,19 +1899,19 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
         stats.notices += 1;
         waitSeconds = 0;
       } else {
-        waitSeconds += 60;
+        waitSeconds += FISHING_TICK_SECONDS;
       }
       continue;
     }
     const row = roulette(weights.entries, (entry) => entry.encounterShare);
     if (!row) {
-      waitSeconds += 60;
+      waitSeconds += FISHING_TICK_SECONDS;
       continue;
     }
-    const groundbaitFactor = groundbaitMultiplier(groundbaitConfig, presentation, row.fish, tick * 60);
+    const groundbaitFactor = groundbaitMultiplier(groundbaitConfig, presentation, row.fish, tick * FISHING_TICK_SECONDS);
     const evals = evaluateFish(presentation, row.fish, row.entry, region, env, waitMultiplier, groundbaitFactor);
     if (Math.random() >= evals.notice) {
-      waitSeconds += 60;
+      waitSeconds += FISHING_TICK_SECONDS;
       continue;
     }
     stats.notices += 1;
@@ -1823,7 +1939,7 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
       stats.notices += 0;
       waitSeconds = 0;
     } else {
-      waitSeconds += 60;
+      waitSeconds += FISHING_TICK_SECONDS;
     }
   }
   return { presentation, stats, ticks };
@@ -1841,12 +1957,9 @@ function roulette(rows, getWeight) {
 }
 
 function rollCatch(fishObj, poolEntry) {
-  const u = Math.random();
-  const skew = normalish() + 1.8 * ((poolEntry?.sizeModifier ?? 1) - 1);
-  const percentile = clamp(0.5 + skew / 6);
-  const weight = lerp(fishObj.weightMin, fishObj.weightMax, clamp(percentile * 0.9 + 0.05));
-  const rating = u > 0.9995 ? "legendary" : u > 0.985 ? "epic" : u > 0.9 ? "rare" : u > 0.38 ? "standard" : "below";
-  const multiplier = { below: 0.2, standard: 1, rare: 2, epic: 5, legendary: 10 }[rating];
+  const weight = catchWeightFromSkew(fishObj, normalish() + catchSizeShift(poolEntry));
+  const rating = ratingFromRoll(Math.random());
+  const multiplier = RATING_MULTIPLIERS[rating] ?? 1;
   return { weight, rating, value: fishObj.baseValue * weight * multiplier };
 }
 
@@ -1854,6 +1967,23 @@ function normalish() {
   let sum = 0;
   for (let i = 0; i < 6; i += 1) sum += Math.random();
   return sum - 3;
+}
+
+function catchSizeShift(poolEntry) {
+  return 1.8 * ((poolEntry?.sizeModifier ?? 1) - 1);
+}
+
+function catchWeightFromSkew(fishObj, skew) {
+  const percentile = clamp(0.5 + skew / 6);
+  return lerp(fishObj.weightMin, fishObj.weightMax, clamp(percentile * 0.9 + 0.05));
+}
+
+function ratingFromRoll(u) {
+  if (u > 0.9995) return "legendary";
+  if (u > 0.985) return "epic";
+  if (u > 0.9) return "rare";
+  if (u > 0.38) return "standard";
+  return "below";
 }
 
 function lerp(a, b, t) {
@@ -1883,15 +2013,17 @@ function renderResults(estimate, sim, hours, groundbaitConfig = null) {
   const catches = stats ? stats.catches : estimate.expectedCatch;
   const biteCount = stats ? stats.bites : estimate.expectedBites;
   const noticeCount = stats ? stats.notices : estimate.expectedNotices;
-  const falseSignals = stats ? stats.falseSignals : estimate.falseSignalRate * hours * 60;
+  const falseSignals = stats ? stats.falseSignals : estimate.falseSignalRate * fishingTicksForHours(hours);
   const snags = stats ? stats.snagEvents : estimate.snagEvents;
   const saleValue = stats ? stats.saleValue : estimateSaleValue(estimate);
   const groundbaitLabel = groundbaitSummary(groundbaitConfig, estimate.presentation);
+  const tension = tensionSafetySummary(estimate.presentation);
   els.subtitle.textContent = `${ROD_LABELS[estimate.presentation.rodType]} · ${getRegion().name} / ${getSpot(getRegion()).name} · 全天候均值${groundbaitLabel ? ` · ${groundbaitLabel}` : ""} · ${hours} 小时${stats ? "随机模拟" : "期望估算"}`;
   els.summary.innerHTML = [
     summaryCard("成功起鱼", catches.toFixed(stats ? 0 : 1), `${(catches / hours).toFixed(2)} 条/小时`),
     summaryCard("实咬次数", biteCount.toFixed(stats ? 0 : 1), `遭遇率 ${(estimate.encounterRate * 100).toFixed(1)}% / tick`),
     summaryCard("鱼讯总数", noticeCount.toFixed(stats ? 0 : 1), `含误判 ${falseSignals.toFixed(stats ? 0 : 1)} 次`),
+    summaryCard("摩擦片张力", tension.value, tension.note),
     summaryCard("估算金币", money(saleValue), `挂底约 ${snags.toFixed(stats ? 0 : 1)} 次`),
   ].join("");
 
@@ -1906,8 +2038,51 @@ function summaryCard(label, value, note) {
   return `<div class="summary-card"><span class="summary-label">${label}</span><span class="summary-value">${value}</span><span class="summary-note">${note}</span></div>`;
 }
 
+function tensionSafetySummary(presentation) {
+  const safety = presentation.tackleSafety || tackleSafetyProfile(presentation.items, presentation.controls);
+  const weak = `${tensionPartLabel(safety.weakPart)} ${safety.weakTension.toFixed(1)}kg`;
+  if (!presentation.items.reel) return { value: `${safety.weakTension.toFixed(1)}kg`, note: `无鱼轮 · 薄弱点 ${weak}` };
+  const status = safety.dragToWeakRatio > 1 ? "偏高" : safety.dragToWeakRatio > 0.85 ? "临界" : "安全";
+  return { value: `${safety.dragTension.toFixed(1)}kg`, note: `${status} · 薄弱点 ${weak}` };
+}
+
+function tensionPartLabel(part) {
+  return { rod: "鱼竿", line: "主线", leader: "前导", reel: "鱼轮", hook: "鱼钩" }[part] || "钓组";
+}
+
 function estimateSaleValue(estimate) {
-  return estimate.fishRows.reduce((sum, row) => sum + row.catch * row.fish.baseValue * avg([row.fish.weightMin, row.fish.weightMax]), 0);
+  return estimate.fishRows.reduce((sum, row) => sum + row.catch * expectedCatchValue(row.fish, row.entry), 0);
+}
+
+function expectedCatchValue(fishObj, poolEntry) {
+  return fishObj.baseValue * expectedCatchWeight(fishObj, poolEntry) * EXPECTED_RATING_MULTIPLIER;
+}
+
+function expectedCatchWeight(fishObj, poolEntry) {
+  const shift = catchSizeShift(poolEntry);
+  let total = 0;
+  for (let i = 1; i <= EXPECTED_WEIGHT_SAMPLE_COUNT; i += 1) {
+    const skew = haltonNormalish(i);
+    total += catchWeightFromSkew(fishObj, shift + skew);
+    total += catchWeightFromSkew(fishObj, shift - skew);
+  }
+  return total / (EXPECTED_WEIGHT_SAMPLE_COUNT * 2);
+}
+
+function haltonNormalish(index) {
+  return halton(index, 2) + halton(index, 3) + halton(index, 5) + halton(index, 7) + halton(index, 11) + halton(index, 13) - 3;
+}
+
+function halton(index, base) {
+  let result = 0;
+  let fraction = 1 / base;
+  let i = index;
+  while (i > 0) {
+    result += fraction * (i % base);
+    i = Math.floor(i / base);
+    fraction /= base;
+  }
+  return result;
 }
 
 function money(value) {
@@ -1932,6 +2107,7 @@ function renderDistribution(rows) {
 function mapRevenueTopRows(loadout, controls, level, hours) {
   const rows = [];
   for (const region of DATA.regions) {
+    if (region.simulatorVirtual) continue;
     if ((region.level || 1) > level) continue;
     const env = getWeather(region);
     const spots = region.spots?.length ? region.spots : [defaultSpot()];
@@ -1984,7 +2160,10 @@ function renderMapRevenueRanking(rows) {
 
 function renderRegionOptions() {
   const current = els.region.value;
-  els.region.innerHTML = DATA.regions.map((region) => `<option value="${region.id}">Lv.${region.level} · ${escapeHtml(region.name)}</option>`).join("");
+  els.region.innerHTML = DATA.regions.map((region) => {
+    const tag = region.simulatorVirtual ? " · 官方模拟鱼池" : "";
+    return `<option value="${region.id}">Lv.${region.level} · ${escapeHtml(region.name)}${tag}</option>`;
+  }).join("");
   if (DATA.regions.some((region) => region.id === current)) els.region.value = current;
 }
 
