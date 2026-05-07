@@ -1,0 +1,9 @@
+.DS_Store
+node_modules/
+dist/
+build/
+.env
+*.log
+
+# Local scratch/other experiments in this workspace.
+T1/

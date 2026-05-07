@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LazyFisher 上鱼率模拟器</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div>
+          <h1>LazyFisher 上鱼率模拟器</h1>
+          <p>基于帮助页公开公式与站内真实静态数据：选择地图和等级，自动推荐高上鱼率钓组，也可手动模拟多小时作钓。</p>
+        </div>
+        <a class="source-link" href="https://lazyfisher.toogle.club/help" target="_blank" rel="noreferrer">公式来源</a>
+      </header>
+
+      <main class="layout">
+        <section class="workspace">
+          <div class="panel control-panel">
+            <div class="panel-head">
+              <div>
+                <h2>基础条件</h2>
+                <p>等级会筛掉不可用装备；环境按全天与官方天气均值计算。</p>
+              </div>
+              <button id="recommendBtn" class="primary-btn" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2l1.9 5.9H20l-5 3.6 1.9 5.9L12 13.8l-4.9 3.6L9 11.5 4 7.9h6.1L12 2z"/></svg>
+                推荐方案
+              </button>
+            </div>
+
+            <div class="form-grid">
+              <label>
+                <span>地图</span>
+                <select id="regionSelect"></select>
+              </label>
+              <label>
+                <span>钓位</span>
+                <select id="spotSelect"></select>
+              </label>
+              <label>
+                <span>自身等级</span>
+                <input id="levelInput" type="number" min="1" max="200" value="12" />
+              </label>
+              <label>
+                <span>目标时长（小时）</span>
+                <input id="hoursInput" type="number" min="1" max="72" value="6" />
+              </label>
+              <label>
+                <span>渔场熟练度</span>
+                <input id="proficiencyInput" type="number" min="0" max="100" value="20" />
+              </label>
+              <label>
+                <span>时间口径</span>
+                <output id="timeOutput" class="static-value">全天 24 小时平均</output>
+                <input id="timeInput" type="hidden" value="average" />
+              </label>
+              <label class="static-field">
+                <span>天气口径</span>
+                <output class="static-value">官方天气预设均值</output>
+                <select id="weatherSelect" hidden>
+                  <option value="calm">平静</option>
+                  <option value="cloudy">多云</option>
+                  <option value="rainy">雨天</option>
+                  <option value="windy">风浪</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head compact">
+              <div>
+                <h2>自动推荐</h2>
+                <p>按每小时期望成功起鱼数排序，同时显示误判和挂底风险。</p>
+              </div>
+              <span id="recommendMeta" class="meta-pill">等待计算</span>
+            </div>
+            <div id="recommendations" class="recommendations"></div>
+          </div>
+
+          <div class="manual-grid">
+            <section class="panel">
+              <div class="panel-head compact">
+                <div>
+                  <h2>手动钓组</h2>
+                  <p>选不同装备与参数，模拟多个小时的上鱼情况。</p>
+                </div>
+                <button id="simulateBtn" class="secondary-btn" type="button">
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                  开始模拟
+                </button>
+              </div>
+
+              <div class="loadout-tabs" role="tablist" aria-label="竿型">
+                <button class="loadout-tab active" type="button" data-rod-type="hand_rod">手竿</button>
+                <button class="loadout-tab" type="button" data-rod-type="match_rod">赛竿</button>
+                <button class="loadout-tab" type="button" data-rod-type="bottom_rod">底钓</button>
+                <button class="loadout-tab" type="button" data-rod-type="lure_rod">路亚</button>
+              </div>
+
+              <div id="manualFields" class="form-grid dense"></div>
+
+              <div class="transfer-box">
+                <div class="transfer-head">
+                  <label class="json-label" for="loadoutJson">
+                    <span>装备数据 JSON</span>
+                    <textarea id="loadoutJson" spellcheck="false" placeholder='{"version":1,"loadout":{"rod":"..."}}'></textarea>
+                  </label>
+                  <div class="transfer-actions" aria-label="装备数据导入导出">
+                    <button id="importLoadoutBtn" class="secondary-btn compact-btn" type="button">
+                      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 4h2v8l3.2-3.2 1.4 1.4L12 15.8l-5.6-5.6 1.4-1.4L11 12V4zM5 18h14v2H5v-2z"/></svg>
+                      导入文本
+                    </button>
+                    <button id="exportLoadoutBtn" class="secondary-btn compact-btn" type="button">
+                      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 16h2V8l3.2 3.2 1.4-1.4L12 4.2 6.4 9.8l1.4 1.4L11 8v8zM5 18h14v2H5v-2z"/></svg>
+                      导出当前
+                    </button>
+                    <button id="downloadLoadoutBtn" class="icon-btn" type="button" aria-label="下载装备数据">
+                      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <p id="transferStatus" class="transfer-status">等待导入或导出</p>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head compact">
+                <div>
+                  <h2>参数调校</h2>
+                  <p>0 表示沿用公式里的自动推荐值。</p>
+                </div>
+                <button id="resetControlsBtn" class="icon-btn" type="button" aria-label="重置参数">
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5a7 7 0 1 1-6.3 4H3l3.8-4L10.5 9H7.8A5 5 0 1 0 12 7V5z"/></svg>
+                </button>
+              </div>
+              <div class="form-grid dense">
+                <label>
+                  <span>抛投距离 m</span>
+                  <input id="castInput" type="number" min="0" max="120" step="0.5" value="0" />
+                </label>
+                <label>
+                  <span>浮漂线长 cm</span>
+                  <input id="floatInput" type="number" min="0" max="3000" step="10" value="0" />
+                </label>
+                <label>
+                  <span>摩擦片比例</span>
+                  <input id="dragInput" type="range" min="0" max="1" step="0.001" value="0.5" />
+                  <output id="dragOutput">0.50</output>
+                </label>
+                <label>
+                  <span>收线速度 m/s</span>
+                  <input id="reelSpeedInput" type="number" min="0" max="10" step="0.1" value="1.2" />
+                </label>
+                <label>
+                  <span>路亚动作</span>
+                  <select id="lureActionInput">
+                    <option value="auto">按拟饵自动</option>
+                    <option value="steady_surface">浅层匀速</option>
+                    <option value="steady_mid">中层匀速</option>
+                    <option value="bottom_hop">底层跳动</option>
+                    <option value="mid_twitch">中层抽动</option>
+                  </select>
+                </label>
+                <label>
+                  <span>切线回合上限</span>
+                  <input id="lineCutRoundInput" type="number" min="1" max="500" step="1" value="100" />
+                </label>
+                <label>
+                  <span>切线出线阈值 m</span>
+                  <input id="lineCutInput" type="number" min="0" max="500" step="1" value="0" />
+                </label>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <aside class="results-column">
+          <section class="panel result-panel">
+            <div class="panel-head compact">
+              <div>
+                <h2>模拟结果</h2>
+                <p id="resultSubtitle">默认载入当前等级的推荐手竿方案。</p>
+              </div>
+            </div>
+            <div id="summaryCards" class="summary-grid"></div>
+            <div id="distribution" class="distribution"></div>
+          </section>
+
+          <section class="panel formula-panel">
+            <h2>本页采用的公式骨架</h2>
+            <ul>
+              <li>60 秒一次 FISHING tick，先判定遭遇率。</li>
+              <li>地图、鱼种、装备与天气来自官方 get_game_data 静态配置。</li>
+              <li>时间按全天平均，天气按官方预设均值，不绑定具体时刻或天气。</li>
+              <li>鱼种权重由鱼群、全天咬口、水层、天气均值和渔场/钓位抛距重分配。</li>
+              <li>随后依次计算发现率、舔饵/实咬率、死口率。</li>
+              <li>成功上鱼再经过简化遛鱼安全率，得到最终起鱼数。</li>
+            </ul>
+            <p>真实服务端还有地图隐藏倍率、打窝状态、玩家库存耐久、船钓状态和完整 REELING 状态机；本页用于方案比较和参数体感，不直接等同线上结算。</p>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script src="./game-data.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
