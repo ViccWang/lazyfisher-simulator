@@ -20,6 +20,9 @@ const LURE_ACTION_LABELS = {
 };
 
 const AVERAGE_TIME_MATCH_CACHE = new Map();
+const GROUNDBAIT_MAX_AMOUNT = 3000;
+const GROUNDBAIT_DECAY_SECONDS = 7200;
+const GROUNDBAIT_MAX_MULTIPLIER = 3;
 const DATA = normalizeGameData(window.LAZYFISHER_GAME_DATA);
 
 
@@ -62,6 +65,8 @@ function normalizeRegion(item) {
     name: item.name,
     description: item.description || "",
     level: item.level_required ?? 1,
+    fishingMode: item.fishing_mode || "shore",
+    sceneType: item.scene_type || "shore",
     depthMin: item.depth_min ?? 0.4,
     depthMax: item.depth_max ?? item.depth_min ?? 1,
     waterType: item.water_type || "freshwater",
@@ -281,6 +286,7 @@ const state = {
   loadout: {},
   controls: defaultControls(),
 };
+let spotOverride = null;
 
 function defaultControls(overrides = {}) {
   const lineCutLineOutLimitM = overrides.lineCutLineOutLimitM ?? overrides.lineCutOut ?? 0;
@@ -310,6 +316,9 @@ const els = {
   time: $("timeInput"),
   timeOutput: $("timeOutput"),
   weather: $("weatherSelect"),
+  groundbaitMode: $("groundbaitModeSelect"),
+  groundbaitType: $("groundbaitTypeSelect"),
+  groundbaitAmount: $("groundbaitAmountInput"),
   recommendBtn: $("recommendBtn"),
   recommendations: $("recommendations"),
   recommendMeta: $("recommendMeta"),
@@ -331,6 +340,7 @@ const els = {
   resetControls: $("resetControlsBtn"),
   summary: $("summaryCards"),
   distribution: $("distribution"),
+  mapRevenue: $("mapRevenue"),
   subtitle: $("resultSubtitle"),
 };
 
@@ -375,12 +385,23 @@ function getRegion() {
 
 function getSpot(region = getRegion()) {
   const spots = region.spots?.length ? region.spots : [defaultSpot()];
+  if (spotOverride?.regionId === region.id) return byId(spots, spotOverride.spotId) || spots[0];
   return byId(spots, els.spot.value) || spots[0];
 }
 
 function activeCastOffset(region = getRegion()) {
   const spot = getSpot(region);
   return (region.castOffset ?? 0) + (spot?.castOffset ?? 0);
+}
+
+function withSpot(region, spot, fn) {
+  const previous = spotOverride;
+  spotOverride = { regionId: region.id, spotId: spot?.id || "" };
+  try {
+    return fn();
+  } finally {
+    spotOverride = previous;
+  }
 }
 
 function getWeather(region) {
@@ -395,6 +416,64 @@ function getWeather(region) {
     visibilityFactor: avg(rows.map((row) => row.visibilityFactor)),
     fishActivityFactor: avg(rows.map((row) => row.fishActivityFactor)),
   };
+}
+
+function isShoreRegion(region = getRegion()) {
+  return region?.fishingMode !== "boat" && region?.sceneType !== "boat" && !String(region?.id || "").startsWith("boat_");
+}
+
+function groundbaitTypeOptions() {
+  const seen = new Set();
+  const rows = [];
+  for (const bait of DATA.baits) {
+    if (!bait.baitType || seen.has(bait.baitType)) continue;
+    seen.add(bait.baitType);
+    rows.push(bait.baitType);
+  }
+  return rows.sort((a, b) => baitTypeLabel(a).localeCompare(baitTypeLabel(b), "zh-CN"));
+}
+
+function currentGroundbaitConfig(loadout = state.loadout, region = getRegion()) {
+  const mode = els.groundbaitMode.value;
+  const enabled = isShoreRegion(region) && mode !== "none";
+  const amount = clamp(Number(els.groundbaitAmount.value), 0, GROUNDBAIT_MAX_AMOUNT);
+  const autoType = byId(DATA.baits, loadout?.bait)?.baitType || "";
+  const selectedType = els.groundbaitType.value || "";
+  return {
+    enabled: enabled && amount > 0,
+    mode,
+    baitType: mode === "auto" ? autoType : selectedType,
+    amount,
+  };
+}
+
+function groundbaitMultiplier(config, presentation, fishObj, elapsedSeconds = 0, hours = null) {
+  const baitType = config?.mode === "auto" ? presentation.items.bait?.baitType : config?.baitType;
+  if (!config?.enabled || presentation.rodType === "lure_rod" || !baitType) return 1;
+  if (fishObj.baitPreference !== baitType) return 1;
+  if (hours !== null) return averageGroundbaitMultiplier(config.amount, hours);
+  const remaining = Math.max(0, config.amount - (GROUNDBAIT_MAX_AMOUNT / GROUNDBAIT_DECAY_SECONDS) * elapsedSeconds);
+  return groundbaitMultiplierFromAmount(remaining);
+}
+
+function averageGroundbaitMultiplier(amount, hours) {
+  const ticks = Math.max(1, Math.round(hours * 60));
+  let total = 0;
+  for (let tick = 0; tick < ticks; tick += 1) total += groundbaitMultiplierFromAmount(amount - (GROUNDBAIT_MAX_AMOUNT / GROUNDBAIT_DECAY_SECONDS) * tick * 60);
+  return total / ticks;
+}
+
+function groundbaitMultiplierFromAmount(amount) {
+  const ratio = clamp(amount / GROUNDBAIT_MAX_AMOUNT);
+  const smooth = ratio ** 2 * (3 - 2 * ratio);
+  return 1 + (GROUNDBAIT_MAX_MULTIPLIER - 1) * smooth;
+}
+
+function groundbaitSummary(config, presentation = null) {
+  if (!config?.enabled) return "";
+  const baitType = config.mode === "auto" ? presentation?.items?.bait?.baitType || config.baitType : config.baitType;
+  if (!baitType) return "";
+  return `打窝 ${baitTypeLabel(baitType)} ${Math.round(config.amount)}/${GROUNDBAIT_MAX_AMOUNT}`;
 }
 
 function averageWeatherPresets() {
@@ -564,6 +643,11 @@ function baitTypeLabel(type) {
     corn: "玉米",
     insect: "昆虫",
     algae_paste: "藻饵",
+    grass: "草饵",
+    grain: "谷物",
+    pellet: "颗粒",
+    snail: "螺饵",
+    paste: "面饵",
     shrimp: "虾饵",
     small_fish: "活小鱼",
     shellfish: "贝肉",
@@ -590,10 +674,17 @@ function materialVisibility(material) {
 }
 
 function hookProfile(hookItem) {
-  if (!hookItem) return { bonus: 0.45, snag: 0.2 };
-  if (hookItem.hookType === "treble") return { bonus: 0.75, snag: 0.55 };
-  if (hookItem.hookType === "double") return { bonus: 0.6, snag: 0.4 };
-  return { bonus: 0.45, snag: 0.2 };
+  if (!hookItem) return { bonus: 0.45, visibilitySnag: 0.2, snag: 0.2 };
+  const byType = {
+    treble: { bonus: 0.75, visibilitySnag: 0.55, fallbackSnag: 0.7 },
+    double: { bonus: 0.6, visibilitySnag: 0.4, fallbackSnag: 0.45 },
+    single: { bonus: 0.45, visibilitySnag: 0.2, fallbackSnag: 0.2 },
+  }[hookItem.hookType] || { bonus: 0.45, visibilitySnag: 0.2, fallbackSnag: 0.2 };
+  return {
+    bonus: byType.bonus,
+    visibilitySnag: byType.visibilitySnag,
+    snag: hookItem.snagFactor ?? byType.fallbackSnag,
+  };
 }
 
 function resolveAction(rawAction, lureType) {
@@ -707,13 +798,13 @@ function buildPresentation(loadout, controls, region, env, level) {
   const rawLineVisibility = items.leader ? avg([line.visibility, items.leader.visibility]) : line.visibility;
   const lineVisibility = clamp((0.6 * rawLineVisibility + 0.4 * materialVisibility(lineForVision.material)) * (env.visibilityFactor ?? 1) * (1 - 0.35 * ambient));
   const hook = hookProfile(hookItem);
-  const hookVisibility = clamp(hookItem.recognition * (1 - 0.25 * ambient) + 0.35 * hook.snag);
+  const hookVisibility = clamp(hookItem.recognition * (1 - 0.25 * ambient) + 0.35 * hook.visibilitySnag);
   const reelPower = items.reel ? clamp(0.35 * (items.reel.gearRatio / 8) + 0.25 * (items.reel.speedMax / 12) + 0.4 * (items.reel.frictionMax / 6)) : 0.15;
   const floatLinePenalty = floatDetectionPenalty(targetDepth);
-  const detectionScore = biteDetectionScore(rodType, items, targetDepth, floatLinePenalty);
-  const hookPower = hookPowerScore(rodType, items, controls, reelPower, ctrl, detectionScore, hook);
   const lureBase = lurePresentation(items, controls, action, targetLayer, ctrl, lineVisibility, hookVisibility, reelPower, null);
   const baitBase = baitPresentation(items, env, ctrl, lineVisibility, hookVisibility);
+  const detectionScore = biteDetectionScore(rodType, items, targetDepth, floatLinePenalty);
+  const hookPower = hookPowerScore(rodType, items, controls, reelPower, ctrl, detectionScore, lureBase.retrieveBase);
   const snagRate = snagChance({ rodType, targetDepth, actualCast, idealRodDistance, reachFactor, ctrl, durabilityFactor, env, region, items, lureBase, controls, hook });
 
   return {
@@ -774,31 +865,39 @@ function floatDetectionPenalty(targetDepth) {
 }
 
 function biteDetectionScore(rodType, items, targetDepth, floatLinePenalty) {
-  const lineFactor = clamp(1 - 0.3 * (items.line?.visibility ?? 0.4));
-  const rodFactor = clamp(0.5 + 0.05 * (items.rod?.hardness ?? 5));
   if (rodType === "hand_rod" || rodType === "match_rod") {
     const f = items.float || { sensitivity: 0.45, threshold: 24 };
-    const floatScore = clamp((0.35 + 0.65 * f.sensitivity) * clamp(18 / Math.max(6, f.threshold), 0.25, 1) * floatLinePenalty);
-    return clamp(0.55 * floatScore + 0.25 * lineFactor + 0.2 * rodFactor);
+    return clamp((0.35 + 0.65 * f.sensitivity) * clamp(18 / Math.max(6, f.threshold), 0.25, 1) * floatLinePenalty);
   }
   if (rodType === "bottom_rod") {
-    const tipItem = items.tip || { sensitivity: 0.2, threshold: 42, testMin: 10, testMax: 40 };
-    const sinkerWeight = items.sinker?.weight ?? 20;
-    const tipMid = (tipItem.testMin + tipItem.testMax) / 2;
-    const tipSpan = Math.max(4, (tipItem.testMax - tipItem.testMin) / 2);
-    const tipWeight = gauss(sinkerWeight, tipMid, tipSpan);
-    const tipScore = clamp(0.25 + 0.45 * tipItem.sensitivity + 0.3 * tipWeight);
-    return clamp(0.62 * tipScore + 0.22 * lineFactor + 0.16 * rodFactor);
+    return bottomDetectionMetrics(items).sensitivity;
   }
+  const lineFactor = clamp(1 - 0.3 * (items.line?.visibility ?? 0.4));
+  const rodFactor = clamp(0.5 + 0.05 * (items.rod?.hardness ?? 5));
   return clamp(0.35 + 0.25 * lineFactor + 0.24 * rodFactor + 0.16 * (items.reel ? items.reel.speedMax / 10 : 0.2));
 }
 
-function hookPowerScore(rodType, items, controls, reelPower, ctrl, detectionScore) {
+function bottomDetectionMetrics(items) {
+  const tipItem = items.tip || { sensitivity: 0.2, threshold: 42, testMin: 10, testMax: 40 };
+  const sinkerWeight = items.sinker?.weight ?? 20;
+  const tipMid = (tipItem.testMin + tipItem.testMax) / 2;
+  const tipSpan = Math.max(4, (tipItem.testMax - tipItem.testMin) / 2);
+  const tipWeight = gauss(sinkerWeight, tipMid, tipSpan);
+  const tipSensitivity = clamp(0.25 + 0.45 * tipItem.sensitivity + 0.3 * tipWeight);
+  const tipThreshold = Math.max(2, tipItem.threshold * (1.2 - 0.45 * tipSensitivity));
+  const bellSensitivity = 0.1;
+  const bellThreshold = 58;
+  const sensitivity = clamp(0.65 * tipSensitivity + 0.35 * bellSensitivity);
+  const threshold = Math.max(1, 0.7 * tipThreshold + 0.3 * bellThreshold - 3 * sensitivity);
+  return { sensitivity, threshold, tipRawSensitivity: tipItem.sensitivity };
+}
+
+function hookPowerScore(rodType, items, controls, reelPower, ctrl, detectionScore, lureRetrieveBase = 0.75) {
   const transfer = clamp(1 - 0.55 * (items.line?.lineTension ?? 0.35));
   const dragWindow = gauss(controls.dragRatio, 0.45, 0.35);
   const hard = clamp((items.rod?.hardness ?? 5) / 10);
   if (rodType === "bottom_rod") return clamp(0.35 + 0.25 * clamp((items.sinker?.weight ?? 20) / 40) + 0.15 * dragWindow + 0.15 * reelPower + 0.1 * ctrl + 0.1 * transfer + 0.1 * detectionScore);
-  if (rodType === "lure_rod") return clamp(0.3 + 0.2 * 0.75 + 0.2 * reelPower + 0.15 * ctrl + 0.15 * transfer + 0.1 * hard);
+  if (rodType === "lure_rod") return clamp(0.3 + 0.2 * lureRetrieveBase + 0.2 * reelPower + 0.15 * ctrl + 0.15 * transfer + 0.1 * hard);
   return clamp(0.25 + 0.2 * (items.float?.sensitivity ?? 0.5) + 0.2 * ctrl + 0.15 * transfer + 0.1 * dragWindow + 0.1 * hard);
 }
 
@@ -806,7 +905,7 @@ function baitPresentation(items, env, ctrl, lineVisibility, hookVisibility) {
   const baitItem = items.bait;
   const sink = clamp((items.sinker?.weight ?? 0) / 30);
   const motion = clamp(0.25 + 0.15 * colorStrength(baitItem?.color) + 0.15 * clamp(env.waterFlow / 2.5) + 0.15 * (items.float?.sensitivity ?? 0.25) + 0.1 * sink);
-  const naturalness = clamp(0.45 + 0.2 * naturalColor(baitItem?.color) + 0.15 * ctrl - 0.15 * lineVisibility - 0.15 * hookVisibility + 0.15 * (baitItem?.naturalness ?? 0.6));
+  const naturalness = clamp(0.45 + 0.2 * naturalColor(baitItem?.color) + 0.15 * ctrl - 0.15 * lineVisibility - 0.15 * hookVisibility);
   return { motion, naturalness };
 }
 
@@ -941,7 +1040,7 @@ function hookAndPayloadFactors(presentation, fishObj, poolEntry) {
   return { mouth, payloadMatch, hookSizeMatch, hookSize };
 }
 
-function evaluateFish(presentation, fishObj, poolEntry, region, env, waitMultiplier = 1) {
+function evaluateFish(presentation, fishObj, poolEntry, region, env, waitMultiplier = 1, groundbaitFactor = 1) {
   const dist = fishDistanceFactor(presentation, fishObj, region);
   const pref = preferenceMatch(presentation, fishObj);
   const layer = layerMatch(presentation.targetLayer, fishObj.waterLayer);
@@ -976,7 +1075,7 @@ function evaluateFish(presentation, fishObj, poolEntry, region, env, waitMultipl
     const rodNotice = { hand_rod: 15.6, match_rod: 25.2, bottom_rod: 6, lure_rod: 7 }[presentation.rodType] ?? 8;
     notice = clamp(rodNotice * region.noticeMultiplier * clamp((1 - 0.4 * presentation.lineVisibility) * (1 - 0.2 * presentation.hookVisibility) * (0.3 + 0.5 * presentation.ambient) * 0.5 * pref + 0.15) * (1 / Math.max(fishObj.alertness, 0.5)) * (0.92 + 0.08 * dist.factor) * hookNoticeBonus(hookSize.hookSizeMatch));
     lick = clamp((0.5 * biteBase + 0.15) * waitMultiplier);
-    bite = clamp(0.85 * biteBase * waitMultiplier);
+    bite = clamp(0.85 * biteBase * waitMultiplier * groundbaitFactor);
     const rodBite = { hand_rod: 1.3, match_rod: 2, bottom_rod: 1.1 }[presentation.rodType] ?? 1;
     ({ lick, bite } = capLickBite(lick * rodBite, bite * rodBite));
     const agilityLinear = clamp(fishObj.agility / 5);
@@ -1074,7 +1173,7 @@ function candidateWeights(presentation, region, env, level) {
   };
 }
 
-function estimateLoadout(loadout, controls, region, env, level, hours, waitMultiplier = 1.15) {
+function estimateLoadout(loadout, controls, region, env, level, hours, waitMultiplier = 1.15, groundbaitConfig = currentGroundbaitConfig(loadout, region)) {
   const presentation = buildPresentation(loadout, controls, region, env, level);
   if (!presentation) return null;
   const weights = candidateWeights(presentation, region, env, level);
@@ -1085,7 +1184,8 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
   const fishRows = [];
 
   for (const row of weights.entries) {
-    const evals = evaluateFish(presentation, row.fish, row.entry, region, env, waitMultiplier);
+    const groundbaitFactor = groundbaitMultiplier(groundbaitConfig, presentation, row.fish, 0, hours);
+    const evals = evaluateFish(presentation, row.fish, row.entry, region, env, waitMultiplier, groundbaitFactor);
     const pEncounterFish = weights.encounterRate * row.encounterShare;
     const pNotice = pEncounterFish * evals.notice;
     const pBite = pNotice * evals.bite;
@@ -1135,10 +1235,10 @@ function falseSignalChance(presentation, env) {
     return clamp(0.02 * envFloat * sens * threshold * lineFalse * expFalse, 0, 0.12);
   }
   if (presentation.rodType === "bottom_rod") {
-    const tipItem = presentation.items.tip || { sensitivity: 0.2, threshold: 42 };
+    const bottom = bottomDetectionMetrics(presentation.items);
     const envBottom = 0.72 + 0.35 * clamp(env.waterFlow / 2.5) + 0.3 * clamp(env.wind / 8);
-    const weatherNoise = 1 + tipItem.sensitivity * (0.55 * clamp(env.wind / 8) + 0.45 * clamp(env.rain / 25));
-    return clamp(0.02 * envBottom * (0.8 + presentation.detectionScore) * clamp(24 / Math.max(4, tipItem.threshold), 0.4, 1.5) * weatherNoise * expFalse, 0, 0.12);
+    const weatherNoise = 1 + bottom.tipRawSensitivity * (0.55 * clamp(env.wind / 8) + 0.45 * clamp(env.rain / 25));
+    return clamp(0.02 * envBottom * (0.8 + bottom.sensitivity) * clamp(24 / Math.max(4, bottom.threshold), 0.4, 1.5) * weatherNoise * expFalse, 0, 0.12);
   }
   const lure = presentation.lureBase;
   const falseStim = clamp(0.25 + 0.28 * (lure.reflect ?? 0.4) + 0.26 * (lure.turb ?? 0.4) + 0.18 * (presentation.items.lure?.sound ?? 0.2) + 0.16 * (1 - lure.naturalness) + 0.12 * (1 - lure.retrieveBase), 0.4, 1.8);
@@ -1152,6 +1252,7 @@ function generateRecommendations() {
   const env = getWeather(region);
   const level = currentLevel();
   const hours = clamp(Number(els.hours.value), 1, 72);
+  const groundbaitConfig = currentGroundbaitConfig(state.loadout, region);
   const candidates = [];
   const rodTypes = ["hand_rod", "match_rod", "bottom_rod", "lure_rod"];
 
@@ -1159,7 +1260,7 @@ function generateRecommendations() {
     const rods = recommendationRodCandidates(rodType, level);
     for (const rodItem of rods) {
       const baseLoadout = bestBaseLoadout(rodType, rodItem, level, region);
-      const optimized = optimizeRecommendation(baseLoadout, rodType, region, env, level, hours);
+      const optimized = optimizeRecommendation(baseLoadout, rodType, region, env, level, hours, groundbaitConfig);
       if (optimized) candidates.push(optimized);
     }
   }
@@ -1170,8 +1271,8 @@ function recommendationRodCandidates(rodType, level) {
   return available(DATA.rods, level, (rodItem) => rodItem.rodType === rodType).slice(-6);
 }
 
-function optimizeRecommendation(loadout, rodType, region, env, level, hours) {
-  let best = bestControlsForLoadout(loadout, rodType, region, env, level, hours);
+function optimizeRecommendation(loadout, rodType, region, env, level, hours, groundbaitConfig = currentGroundbaitConfig(loadout, region)) {
+  let best = bestControlsForLoadout(loadout, rodType, region, env, level, hours, groundbaitConfig);
   if (!best) return null;
 
   for (let pass = 0; pass < 3; pass += 1) {
@@ -1180,7 +1281,7 @@ function optimizeRecommendation(loadout, rodType, region, env, level, hours) {
       let localBest = best;
       for (const item of recommendationSlotCandidates(slot, rodType, level)) {
         const trialLoadout = { ...best.loadout, [slot]: item.id || "" };
-        const trial = scoreRecommendation(trialLoadout, best.controls, region, env, level, hours);
+        const trial = scoreRecommendation(trialLoadout, best.controls, region, env, level, hours, groundbaitConfig);
         if (trial && trial.score > localBest.score) localBest = trial;
       }
       if (localBest.score > best.score) {
@@ -1189,7 +1290,7 @@ function optimizeRecommendation(loadout, rodType, region, env, level, hours) {
       }
     }
 
-    const tuned = bestControlsForLoadout(best.loadout, rodType, region, env, level, hours);
+    const tuned = bestControlsForLoadout(best.loadout, rodType, region, env, level, hours, groundbaitConfig);
     if (tuned && tuned.score > best.score) {
       best = tuned;
       changed = true;
@@ -1213,17 +1314,17 @@ function recommendationSlotCandidates(slot, rodType, level) {
   return slot === "leader" ? [{ id: "" }, ...candidates] : candidates;
 }
 
-function bestControlsForLoadout(loadout, rodType, region, env, level, hours) {
+function bestControlsForLoadout(loadout, rodType, region, env, level, hours, groundbaitConfig = currentGroundbaitConfig(loadout, region)) {
   let best = null;
   for (const controls of controlVariants(rodType, region, loadout)) {
-    const trial = scoreRecommendation(loadout, controls, region, env, level, hours);
+    const trial = scoreRecommendation(loadout, controls, region, env, level, hours, groundbaitConfig);
     if (trial && (!best || trial.score > best.score)) best = trial;
   }
   return best;
 }
 
-function scoreRecommendation(loadout, controls, region, env, level, hours) {
-  const estimate = estimateLoadout(loadout, controls, region, env, level, hours, 1.2);
+function scoreRecommendation(loadout, controls, region, env, level, hours, groundbaitConfig = currentGroundbaitConfig(loadout, region)) {
+  const estimate = estimateLoadout(loadout, controls, region, env, level, hours, 1.2, groundbaitConfig);
   if (!estimate) return null;
   const riskPenalty = estimate.snagEvents / Math.max(hours, 1) * 0.08 + estimate.falseSignalRate * 0.22;
   const score = estimate.catchPerHour * (1 - clamp(riskPenalty, 0, 0.35));
@@ -1632,7 +1733,7 @@ function tuneControlsForCurrentLoadout() {
   const hours = clamp(Number(els.hours.value), 1, 72);
   const rodItem = byId(DATA.rods, state.loadout.rod);
   const rodType = rodItem?.rodType || state.rodType;
-  const tuned = bestControlsForLoadout(state.loadout, rodType, region, env, level, hours);
+  const tuned = bestControlsForLoadout(state.loadout, rodType, region, env, level, hours, currentGroundbaitConfig(state.loadout, region));
   if (!tuned) return false;
   state.controls = { ...defaultControls(), ...tuned.controls };
   syncControlsToInputs();
@@ -1656,7 +1757,7 @@ function renderTabs() {
   });
 }
 
-function simulate(loadout, controls, region, env, level, hours) {
+function simulate(loadout, controls, region, env, level, hours, groundbaitConfig = currentGroundbaitConfig(loadout, region)) {
   const presentation = buildPresentation(loadout, controls, region, env, level);
   if (!presentation) return null;
   const ticks = Math.max(1, Math.round(hours * 60));
@@ -1691,7 +1792,8 @@ function simulate(loadout, controls, region, env, level, hours) {
       waitSeconds += 60;
       continue;
     }
-    const evals = evaluateFish(presentation, row.fish, row.entry, region, env, waitMultiplier);
+    const groundbaitFactor = groundbaitMultiplier(groundbaitConfig, presentation, row.fish, tick * 60);
+    const evals = evaluateFish(presentation, row.fish, row.entry, region, env, waitMultiplier, groundbaitFactor);
     if (Math.random() >= evals.notice) {
       waitSeconds += 60;
       continue;
@@ -1764,15 +1866,17 @@ function runSimulation(useRandom = true) {
   const env = getWeather(region);
   const level = currentLevel();
   const hours = clamp(Number(els.hours.value), 1, 72);
-  const estimate = estimateLoadout(state.loadout, state.controls, region, env, level, hours, 1.2);
-  const sim = useRandom ? simulate(state.loadout, state.controls, region, env, level, hours) : null;
-  renderResults(estimate, sim, hours);
+  const groundbaitConfig = currentGroundbaitConfig(state.loadout, region);
+  const estimate = estimateLoadout(state.loadout, state.controls, region, env, level, hours, 1.2, groundbaitConfig);
+  const sim = useRandom ? simulate(state.loadout, state.controls, region, env, level, hours, groundbaitConfig) : null;
+  renderResults(estimate, sim, hours, groundbaitConfig);
 }
 
-function renderResults(estimate, sim, hours) {
+function renderResults(estimate, sim, hours, groundbaitConfig = null) {
   if (!estimate) {
     els.summary.innerHTML = `<div class="empty-state">钓组不完整，无法模拟。</div>`;
     els.distribution.innerHTML = "";
+    els.mapRevenue.innerHTML = "";
     return;
   }
   const stats = sim?.stats;
@@ -1781,8 +1885,9 @@ function renderResults(estimate, sim, hours) {
   const noticeCount = stats ? stats.notices : estimate.expectedNotices;
   const falseSignals = stats ? stats.falseSignals : estimate.falseSignalRate * hours * 60;
   const snags = stats ? stats.snagEvents : estimate.snagEvents;
-  const saleValue = stats ? stats.saleValue : estimate.fishRows.reduce((sum, row) => sum + row.catch * row.fish.baseValue * avg([row.fish.weightMin, row.fish.weightMax]), 0);
-  els.subtitle.textContent = `${ROD_LABELS[estimate.presentation.rodType]} · ${getRegion().name} / ${getSpot(getRegion()).name} · 全天候均值 · ${hours} 小时${stats ? "随机模拟" : "期望估算"}`;
+  const saleValue = stats ? stats.saleValue : estimateSaleValue(estimate);
+  const groundbaitLabel = groundbaitSummary(groundbaitConfig, estimate.presentation);
+  els.subtitle.textContent = `${ROD_LABELS[estimate.presentation.rodType]} · ${getRegion().name} / ${getSpot(getRegion()).name} · 全天候均值${groundbaitLabel ? ` · ${groundbaitLabel}` : ""} · ${hours} 小时${stats ? "随机模拟" : "期望估算"}`;
   els.summary.innerHTML = [
     summaryCard("成功起鱼", catches.toFixed(stats ? 0 : 1), `${(catches / hours).toFixed(2)} 条/小时`),
     summaryCard("实咬次数", biteCount.toFixed(stats ? 0 : 1), `遭遇率 ${(estimate.encounterRate * 100).toFixed(1)}% / tick`),
@@ -1794,10 +1899,15 @@ function renderResults(estimate, sim, hours) {
     ? Array.from(stats.fish.values()).sort((a, b) => b.count - a.count).map((row) => ({ label: row.fish.name, value: row.count, note: `${money(row.value)} 金` }))
     : estimate.fishRows.filter((row) => row.catch > 0.02).map((row) => ({ label: row.fish.name, value: row.catch, note: `${row.evals.reelingSuccess.toPercent(0)} 起鱼` }));
   renderDistribution(rows);
+  renderMapRevenueRanking(mapRevenueTopRows(state.loadout, state.controls, currentLevel(), hours));
 }
 
 function summaryCard(label, value, note) {
   return `<div class="summary-card"><span class="summary-label">${label}</span><span class="summary-value">${value}</span><span class="summary-note">${note}</span></div>`;
+}
+
+function estimateSaleValue(estimate) {
+  return estimate.fishRows.reduce((sum, row) => sum + row.catch * row.fish.baseValue * avg([row.fish.weightMin, row.fish.weightMax]), 0);
 }
 
 function money(value) {
@@ -1817,6 +1927,59 @@ function renderDistribution(rows) {
       <span>${Number(row.value).toFixed(row.value >= 10 ? 0 : 1)}</span>
     </div>
   `).join("");
+}
+
+function mapRevenueTopRows(loadout, controls, level, hours) {
+  const rows = [];
+  for (const region of DATA.regions) {
+    if ((region.level || 1) > level) continue;
+    const env = getWeather(region);
+    const spots = region.spots?.length ? region.spots : [defaultSpot()];
+    let best = null;
+    for (const spot of spots) {
+      const groundbaitConfig = currentGroundbaitConfig(loadout, region);
+      const estimate = withSpot(region, spot, () => estimateLoadout(loadout, controls, region, env, level, hours, 1.2, groundbaitConfig));
+      if (!estimate) continue;
+      const saleValue = estimateSaleValue(estimate);
+      const row = {
+        region,
+        spot,
+        saleValue,
+        salePerHour: saleValue / Math.max(hours, 1),
+        catchPerHour: estimate.catchPerHour,
+        groundbaitLabel: groundbaitSummary(groundbaitConfig, estimate.presentation),
+      };
+      if (!best || row.salePerHour > best.salePerHour) best = row;
+    }
+    if (best) rows.push(best);
+  }
+  return rows.sort((a, b) => b.salePerHour - a.salePerHour).slice(0, 3);
+}
+
+function renderMapRevenueRanking(rows) {
+  if (!rows.length) {
+    els.mapRevenue.innerHTML = "";
+    return;
+  }
+  els.mapRevenue.innerHTML = `
+    <div class="map-revenue-head">
+      <strong>当前装备地图收益 Top 3</strong>
+      <span>按估算金币/小时排序</span>
+    </div>
+    ${rows.map((row, index) => `
+      <div class="map-revenue-row">
+        <span class="map-revenue-rank">${index + 1}</span>
+        <span class="map-revenue-main">
+          <strong>${escapeHtml(row.region.name)}</strong>
+          <small>${escapeHtml(row.spot.name)}${row.groundbaitLabel ? ` · ${escapeHtml(row.groundbaitLabel)}` : ""}</small>
+        </span>
+        <span class="map-revenue-value">
+          <strong>${money(row.salePerHour)}</strong>
+          <small>金/小时 · ${row.catchPerHour.toFixed(2)} 条/小时</small>
+        </span>
+      </div>
+    `).join("")}
+  `;
 }
 
 function renderRegionOptions() {
@@ -1843,10 +2006,29 @@ function renderWeatherOptions() {
   if (DATA.weatherPresets.some((weather) => weather.id === current)) els.weather.value = current;
 }
 
+function renderGroundbaitOptions() {
+  const current = els.groundbaitType.value;
+  const types = groundbaitTypeOptions();
+  els.groundbaitType.innerHTML = types.map((type) => `<option value="${escapeHtml(type)}">${escapeHtml(baitTypeLabel(type))}</option>`).join("");
+  if (types.includes(current)) els.groundbaitType.value = current;
+  else if (types.length) els.groundbaitType.value = types[0];
+  updateGroundbaitControls();
+}
+
+function updateGroundbaitControls() {
+  const shore = isShoreRegion();
+  const enabled = shore && els.groundbaitMode.value !== "none";
+  els.groundbaitMode.disabled = !shore;
+  els.groundbaitType.disabled = !enabled || els.groundbaitMode.value !== "type";
+  els.groundbaitAmount.disabled = !enabled;
+  if (!shore) els.groundbaitMode.value = "none";
+}
+
 function init() {
   renderRegionOptions();
   renderSpotOptions();
   renderWeatherOptions();
+  renderGroundbaitOptions();
   state.rodType = "hand_rod";
   normalizeLoadout(state.rodType);
   syncControlsToInputs();
@@ -1880,9 +2062,18 @@ function bindEvents() {
   for (const el of [els.region, els.spot, els.level, els.hours, els.proficiency, els.weather]) {
     el.addEventListener("change", () => {
       if (el === els.region) renderSpotOptions();
+      if (el === els.region) updateGroundbaitControls();
       normalizeLoadout(state.rodType);
       renderManualFields();
       if (el === els.region || el === els.spot || el === els.level) tuneControlsForCurrentLoadout();
+      renderRecommendations();
+      runSimulation(false);
+    });
+  }
+  for (const el of [els.groundbaitMode, els.groundbaitType, els.groundbaitAmount]) {
+    el.addEventListener("change", () => {
+      updateGroundbaitControls();
+      tuneControlsForCurrentLoadout();
       renderRecommendations();
       runSimulation(false);
     });

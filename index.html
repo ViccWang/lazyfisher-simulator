@@ -66,6 +66,22 @@
                   <option value="windy">风浪</option>
                 </select>
               </label>
+              <label>
+                <span>打窝条件</span>
+                <select id="groundbaitModeSelect">
+                  <option value="none">不打窝</option>
+                  <option value="auto">按当前真饵</option>
+                  <option value="type">指定窝料类型</option>
+                </select>
+              </label>
+              <label>
+                <span>窝料类型</span>
+                <select id="groundbaitTypeSelect"></select>
+              </label>
+              <label>
+                <span>起始投喂量</span>
+                <input id="groundbaitAmountInput" type="number" min="0" max="3000" step="100" value="3000" />
+              </label>
             </div>
           </div>
 
@@ -187,6 +203,7 @@
             </div>
             <div id="summaryCards" class="summary-grid"></div>
             <div id="distribution" class="distribution"></div>
+            <div id="mapRevenue" class="map-revenue"></div>
           </section>
 
           <section class="panel formula-panel">
@@ -196,10 +213,11 @@
               <li>地图、鱼种、装备与天气来自官方 get_game_data 静态配置。</li>
               <li>时间按全天平均，天气按官方预设均值，不绑定具体时刻或天气。</li>
               <li>鱼种权重由鱼群、全天咬口、水层、天气均值和渔场/钓位抛距重分配。</li>
+              <li>岸钓打窝按单饵型 3000 满额、约 2 小时衰减，并只强化匹配窝料偏好的真饵实咬。</li>
               <li>随后依次计算发现率、舔饵/实咬率、死口率。</li>
               <li>成功上鱼再经过简化遛鱼安全率，得到最终起鱼数。</li>
             </ul>
-            <p>真实服务端还有地图隐藏倍率、打窝状态、玩家库存耐久、船钓状态和完整 REELING 状态机；本页用于方案比较和参数体感，不直接等同线上结算。</p>
+            <p>真实服务端还有地图隐藏倍率、玩家库存耐久、船钓状态和完整 REELING 状态机；本页用于方案比较和参数体感，不直接等同线上结算。</p>
           </section>
         </aside>
       </main>
