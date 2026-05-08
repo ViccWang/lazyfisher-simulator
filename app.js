@@ -59,6 +59,7 @@ const FISH_VALUE_PER_KG_BY_RARITY = Object.freeze({
 const FISH_VALUE_SIZE_FACTOR_EXPONENT = 0.12;
 const FISH_VALUE_SIZE_FACTOR_MIN = 0.8;
 const FISH_VALUE_SIZE_FACTOR_MAX = 2;
+const EXPECTED_REELING_SAMPLE_COUNT = 3;
 const EXPECTED_RATING_MULTIPLIER =
   0.38 * RATING_MULTIPLIERS.below +
   0.52 * RATING_MULTIPLIERS.standard +
@@ -1214,8 +1215,9 @@ function evaluateFish(presentation, fishObj, poolEntry, region, env, waitMultipl
   }
 
   ({ lick, bite } = capLickBite(lick, bite));
-  const reelingSuccess = reelingSuccessRate(presentation, fishObj, poolEntry, env);
-  return { dist, pref, layer, notice, lick, bite, hookRate, reelingSuccess, hookSize, retrieve };
+  const reelingRisk = expectedReelingOutcome(presentation, fishObj, poolEntry, env);
+  const reelingSuccess = reelingRisk.reelingSuccess;
+  return { dist, pref, layer, notice, lick, bite, hookRate, reelingSuccess, breakChance: reelingRisk.breakChance, escapeChance: reelingRisk.escapeChance, reelingRisk, hookSize, retrieve };
 }
 
 function actionProfileScore(action, agg, agility, alert, layer, actionFactor) {
@@ -1260,23 +1262,81 @@ function preferenceMatch(presentation, fishObj) {
 }
 
 function reelingSuccessRate(presentation, fishObj, poolEntry, env) {
+  return expectedReelingOutcome(presentation, fishObj, poolEntry, env).reelingSuccess;
+}
+
+function expectedReelingOutcome(presentation, fishObj, poolEntry, env) {
+  const central = reelingOutcomeProfile(presentation, fishObj, poolEntry, env);
+  if (canUseCentralReelingOutcome(presentation, fishObj, poolEntry, central)) return central;
+
+  const shift = catchSizeShift(poolEntry);
+  const totals = {
+    reelingSuccess: 0,
+    breakChance: 0,
+    escapeChance: 0,
+    rawTension: 0,
+    lockedLineRisk: 0,
+    sampleCount: 0,
+  };
+  const breakParts = new Map();
+
+  for (let i = 1; i <= EXPECTED_REELING_SAMPLE_COUNT; i += 1) {
+    const skew = haltonNormalish(i);
+    for (const sampleSkew of [shift + skew, shift - skew]) {
+      const sampleWeight = catchWeightFromSkew(fishObj, sampleSkew);
+      const outcome = reelingOutcomeProfile(presentation, fishObj, poolEntry, env, sampleWeight);
+      totals.reelingSuccess += outcome.reelingSuccess;
+      totals.breakChance += outcome.breakChance;
+      totals.escapeChance += outcome.escapeChance;
+      totals.rawTension += outcome.rawTension;
+      totals.lockedLineRisk += outcome.lockedLineRisk;
+      totals.sampleCount += 1;
+      if (outcome.breakPart && outcome.breakChance > 0) {
+        breakParts.set(outcome.breakPart, (breakParts.get(outcome.breakPart) || 0) + outcome.breakChance);
+      }
+    }
+  }
+
+  const sampleCount = Math.max(totals.sampleCount, 1);
+  return {
+    reelingSuccess: clamp(totals.reelingSuccess / sampleCount, 0.01, 0.98),
+    breakChance: clamp(totals.breakChance / sampleCount),
+    escapeChance: clamp(totals.escapeChance / sampleCount),
+    rawTension: totals.rawTension / sampleCount,
+    lockedLineRisk: clamp(totals.lockedLineRisk / sampleCount),
+    breakPart: dominantBreakPart(breakParts),
+  };
+}
+
+function canUseCentralReelingOutcome(presentation, fishObj, poolEntry, central) {
+  if (central.breakChance > 0.01 || central.dragTension > central.weakTension * 0.92) return false;
+  const shift = catchSizeShift(poolEntry);
+  const upperWeight = catchWeightFromSkew(fishObj, shift + 2.4);
+  const upperLoad = fishRawTensionEstimate(fishObj, upperWeight);
+  if (upperLoad > central.weakTension * 0.92) return false;
+  if (presentation.items.reel && upperLoad > Math.max(central.dragTension, 0.1)) {
+    return lineLockedOverloadRisk(presentation, fishObj, upperWeight, upperLoad, central) < 0.02;
+  }
+  return true;
+}
+
+function reelingOutcomeProfile(presentation, fishObj, poolEntry, env, actualWeight = null) {
   const items = presentation.items;
-  const initialWeight = fishInitialMassEstimate(fishObj, poolEntry);
-  const staminaNow = reelingFishStaminaMax(fishObj, initialWeight);
-  const staminaBeforeUpdate = reelingFishStaminaMax(
-    fishObj,
-    initialWeight,
-    PREVIOUS_REELING_FISH_STAMINA_WEIGHT_COEFFICIENT,
-  );
-  const staminaWeightScale = clamp(staminaNow / Math.max(staminaBeforeUpdate, 5), 0.65, 1.05);
-  const fishLoad = Math.max(0.2, initialWeight * (0.72 + 0.24 * fishObj.strength + 0.12 * fishObj.endurance) * staminaWeightScale);
+  const initialWeight = Number.isFinite(actualWeight) && actualWeight > 0 ? actualWeight : fishInitialMassEstimate(fishObj, poolEntry);
+  const fishLoad = fishRawTensionEstimate(fishObj, initialWeight);
   const safety = tackleSafetyProfile(items, presentation.controls);
   const appliedTension = items.reel ? Math.min(fishLoad, Math.max(safety.dragTension, 0.05)) : fishLoad;
   const stressRatio = appliedTension / Math.max(safety.weakTension, 0.1);
   const dragToWeakRatio = safety.dragTension / Math.max(safety.weakTension, 0.1);
+  const rawStressRatio = fishLoad / Math.max(safety.weakTension, 0.1);
+  const lockedLineRisk = lineLockedOverloadRisk(presentation, fishObj, initialWeight, fishLoad, safety);
+  const directBreakRisk = clamp((stressRatio - 1) / 0.35);
+  const lockedBreakRisk = lockedLineRisk * clamp((rawStressRatio - 1) / 1.15);
+  const highDragBreakRisk = clamp((dragToWeakRatio - 1) / 0.35);
+  const breakChance = clamp(0.18 * directBreakRisk + 0.72 * lockedBreakRisk + 0.32 * highDragBreakRisk);
   const overloadRisk = clamp((stressRatio - 0.88) / 0.42);
   const lockedDragRisk = items.reel ? clamp((dragToWeakRatio - 0.92) / 0.5) * clamp(fishLoad / Math.max(safety.weakTension, 0.1)) : 0;
-  const safetyPenalty = clamp(0.75 * overloadRisk + 0.25 * lockedDragRisk);
+  const safetyPenalty = clamp(0.55 * overloadRisk + 0.2 * lockedDragRisk + 0.25 * lockedBreakRisk);
   const usableDrag = items.reel ? Math.min(Math.max(safety.dragTension, 0.05), safety.weakTension) : safety.weakTension;
   const strengthScore = clamp((safety.weakTension + 0.55 * usableDrag) / Math.max(0.3, fishLoad * 1.3), 0, 1.35);
   const staminaScore = clamp(0.34 + 0.32 * softcap(presentation.skills.endurance, 8) + 0.18 * softcap(presentation.skills.strength, 9) + 0.16 * presentation.ctrl);
@@ -1284,7 +1344,65 @@ function reelingSuccessRate(presentation, fishObj, poolEntry, env) {
   const weatherPenalty = 0.06 * clamp(env.wind / 8) + 0.04 * clamp(env.waterFlow / 2.5);
   const lineCutLineOutLimitM = presentation.controls.lineCutLineOutLimitM ?? presentation.controls.lineCutOut ?? 0;
   const cutPenalty = lineCutLineOutLimitM > 0 && presentation.actualCast > lineCutLineOutLimitM ? 0.14 : 0;
-  return clamp(0.08 + 0.42 * strengthScore + 0.18 * staminaScore + 0.14 * lineReserve + 0.12 * presentation.reelPower + 0.06 * presentation.hookPower - weatherPenalty - cutPenalty - 0.52 * safetyPenalty, 0.02, 0.98);
+  const baseSuccess = clamp(0.08 + 0.42 * strengthScore + 0.18 * staminaScore + 0.14 * lineReserve + 0.12 * presentation.reelPower + 0.06 * presentation.hookPower - weatherPenalty - cutPenalty - 0.42 * safetyPenalty, 0.02, 0.98);
+  const reelingSuccess = clamp(baseSuccess * (1 - breakChance), 0.01, 0.98);
+  const escapeChance = clamp((1 - breakChance) * (1 - baseSuccess));
+  return {
+    reelingSuccess,
+    breakChance,
+    escapeChance,
+    breakPart: breakChance > 0.01 ? safety.weakPart : null,
+    weakPart: safety.weakPart,
+    weakTension: safety.weakTension,
+    dragTension: safety.dragTension,
+    rawTension: fishLoad,
+    appliedTension,
+    stressRatio,
+    rawStressRatio,
+    lockedLineRisk,
+  };
+}
+
+function fishRawTensionEstimate(fishObj, initialWeight) {
+  const staminaNow = reelingFishStaminaMax(fishObj, initialWeight);
+  const staminaBeforeUpdate = reelingFishStaminaMax(
+    fishObj,
+    initialWeight,
+    PREVIOUS_REELING_FISH_STAMINA_WEIGHT_COEFFICIENT,
+  );
+  const staminaWeightScale = clamp(staminaNow / Math.max(staminaBeforeUpdate, 5), 0.65, 1.05);
+  return Math.max(0.2, initialWeight * (0.72 + 0.24 * fishObj.strength + 0.12 * fishObj.endurance) * staminaWeightScale);
+}
+
+function lineLockedOverloadRisk(presentation, fishObj, weight, fishLoad, safety) {
+  const items = presentation.items;
+  if (!items.reel) return clamp((fishLoad / Math.max(safety.weakTension, 0.1) - 1) / 1.2);
+  const dragTension = Math.max(safety.dragTension, 0.1);
+  if (fishLoad <= dragTension) return 0;
+  const lineLength = Math.max(1, items.line?.length ?? 80);
+  const freeLine = Math.max(0, lineLength - initialLineOutMeters(presentation));
+  const pressureOverDrag = clamp((fishLoad - dragTension) / dragTension, 0, 3);
+  const runDemand = fishRunDemandMeters(presentation, fishObj, weight) * pressureOverDrag;
+  if (runDemand <= 0) return 0;
+  return clamp((runDemand - freeLine) / Math.max(runDemand, 1));
+}
+
+function fishRunDemandMeters(presentation, fishObj, weight) {
+  const mobility = 0.5 + 0.3 * clamp((fishObj?.agility ?? 1) / 5) + 0.2 * clamp((fishObj?.strength ?? 1) / 5);
+  const controlRelief = 1.15 - 0.35 * clamp(presentation?.ctrl ?? 0.5);
+  return (4 + Math.max(weight, 0.1) ** 0.55 * 8 + mobility * 8) * controlRelief;
+}
+
+function dominantBreakPart(parts) {
+  let bestPart = null;
+  let bestValue = 0;
+  for (const [part, value] of parts.entries()) {
+    if (value > bestValue) {
+      bestPart = part;
+      bestValue = value;
+    }
+  }
+  return bestPart;
 }
 
 function estimatedBiteWindowSeconds(presentation) {
@@ -1341,7 +1459,6 @@ function tackleSafetyProfile(items, controls) {
   const capacities = [
     { part: "rod", tension: tensionCapacity(items.rod, items.rod?.maxTension) },
     { part: "line", tension: tensionCapacity(items.line, items.line?.maxTension) },
-    { part: "hook", tension: tensionCapacity(items.hook, items.hook?.maxTension) },
   ];
   if (items.leader) capacities.push({ part: "leader", tension: tensionCapacity(items.leader, items.leader.maxTension) });
   if (items.reel) capacities.push({ part: "reel", tension: tensionCapacity(items.reel, 1.5 * items.reel.frictionMax) });
@@ -1400,8 +1517,11 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
   let catchPerTick = 0;
   let bitePerTick = 0;
   let noticePerTick = 0;
+  let breakPerTick = 0;
+  let escapePerTick = 0;
   let busySecondsPerTick = 0;
   const fishRows = [];
+  const breakParts = new Map();
 
   for (const row of weights.entries) {
     const groundbaitFactor = groundbaitMultiplier(groundbaitConfig, presentation, row.fish, 0, hours);
@@ -1411,15 +1531,24 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     const pBite = pNotice * evals.bite;
     const pHook = pBite * evals.hookRate;
     const pCatch = pHook * evals.reelingSuccess * (1 - 0.22 * presentation.snagRate);
+    const pBreak = pHook * evals.breakChance;
+    const pEscape = pHook * evals.escapeChance;
     catchPerTick += pCatch;
     bitePerTick += pBite;
     noticePerTick += pNotice;
+    breakPerTick += pBreak;
+    escapePerTick += pEscape;
+    if (evals.reelingRisk.breakPart && pBreak > 0) {
+      breakParts.set(evals.reelingRisk.breakPart, (breakParts.get(evals.reelingRisk.breakPart) || 0) + pBreak);
+    }
     busySecondsPerTick += pNotice * estimatedBiteWindowSeconds(presentation);
     busySecondsPerTick += pHook * estimatedReelingSeconds(presentation, row.fish, row.entry, evals);
     fishRows.push({
       fish: row.fish,
       entry: row.entry,
       catch: pCatch,
+      equipmentBreak: pBreak,
+      escape: pEscape,
       bite: pBite,
       notice: pNotice,
       share: pCatch,
@@ -1431,6 +1560,8 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
   const effectiveTicks = ticks * fishingTimeFactor;
   for (const row of fishRows) {
     row.catch *= effectiveTicks;
+    row.equipmentBreak *= effectiveTicks;
+    row.escape *= effectiveTicks;
     row.bite *= effectiveTicks;
     row.notice *= effectiveTicks;
     row.share *= fishingTimeFactor;
@@ -1440,6 +1571,8 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
   const expectedCatch = catchPerTick * effectiveTicks;
   const expectedBites = bitePerTick * effectiveTicks;
   const expectedNotices = noticePerTick * effectiveTicks + falseSignalRate * effectiveTicks;
+  const equipmentBreaks = breakPerTick * effectiveTicks;
+  const escapeEvents = escapePerTick * effectiveTicks;
   const catchPerHour = catchPerTick * FISHING_TICKS_PER_HOUR * fishingTimeFactor;
   const sortedFishRows = fishRows.sort((a, b) => b.catch - a.catch);
   return {
@@ -1448,6 +1581,9 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     expectedCatch,
     expectedBites,
     expectedNotices,
+    equipmentBreaks,
+    escapeEvents,
+    breakPart: dominantBreakPart(breakParts) || presentation.tackleSafety.weakPart,
     catchPerHour,
     biteRate: bitePerTick * fishingTimeFactor,
     encounterRate: weights.encounterRate,
@@ -1563,10 +1699,20 @@ function bestControlsForLoadout(loadout, rodType, region, env, level, hours, gro
 function scoreRecommendation(loadout, controls, region, env, level, hours, groundbaitConfig = currentGroundbaitConfig(loadout, region)) {
   const estimate = estimateLoadout(loadout, controls, region, env, level, hours, 1.2, groundbaitConfig);
   if (!estimate) return null;
-  const riskPenalty = estimate.snagEvents / Math.max(hours, 1) * 0.08 + estimate.falseSignalRate * 0.22;
   const weightStats = estimateWeightStats(estimate, hours);
-  const score = weightStats.scorePerHour * (1 - clamp(riskPenalty, 0, 0.35));
+  const score = riskAdjustedWeightScore(estimate, hours);
   return { loadout: { ...loadout }, controls: { ...controls }, estimate, score };
+}
+
+function riskAdjustedWeightScore(estimate, hours) {
+  const weightStats = estimateWeightStats(estimate, hours);
+  const safeHours = Math.max(hours, 1);
+  const riskPenalty =
+    estimate.snagEvents / safeHours * 0.08 +
+    estimate.falseSignalRate * 0.22 +
+    estimate.equipmentBreaks / safeHours * 0.22 +
+    estimate.escapeEvents / safeHours * 0.035;
+  return weightStats.scorePerHour * (1 - clamp(riskPenalty, 0, 0.65));
 }
 
 function uniqueRecommendations(candidates) {
@@ -1743,6 +1889,7 @@ function renderRecommendations() {
           <span>抛距 ${rec.estimate.presentation.actualCast.toFixed(1)}m</span>
           <span>线深 ${rec.estimate.presentation.targetDepth.toFixed(1)}m</span>
           <span>上鱼 ${rec.estimate.catchPerHour.toFixed(2)}条/h</span>
+          <span>爆装 ${(rec.estimate.equipmentBreaks / Math.max(Number(els.hours.value), 1)).toFixed(2)}次/h</span>
           <span>挂底 ${rec.estimate.presentation.snagRate.toPercent(1)}</span>
         </div>
       </div>
@@ -2019,6 +2166,8 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
     falseSignals: 0,
     hookMisses: 0,
     escaped: 0,
+    equipmentBreaks: 0,
+    breakParts: new Map(),
     snagEvents: 0,
     saleValue: 0,
     totalWeightKg: 0,
@@ -2062,8 +2211,15 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
       waitSeconds = 0;
       if (Math.random() < evals.hookRate) {
         elapsedSeconds += estimatedReelingSeconds(presentation, row.fish, row.entry, evals);
-        if (Math.random() < evals.reelingSuccess * (1 - 0.22 * presentation.snagRate)) {
-          const catchInfo = rollCatch(row.fish, row.entry);
+        const catchInfo = rollCatch(row.fish, row.entry);
+        const outcome = reelingOutcomeProfile(presentation, row.fish, row.entry, env, catchInfo.weight);
+        const outcomeRoll = Math.random();
+        if (outcomeRoll < outcome.breakChance) {
+          stats.equipmentBreaks += 1;
+          if (outcome.breakPart) {
+            stats.breakParts.set(outcome.breakPart, (stats.breakParts.get(outcome.breakPart) || 0) + 1);
+          }
+        } else if (outcomeRoll < outcome.breakChance + outcome.reelingSuccess * (1 - 0.22 * presentation.snagRate)) {
           stats.catches += 1;
           stats.saleValue += catchInfo.value;
           stats.totalWeightKg += catchInfo.weight;
@@ -2194,24 +2350,28 @@ function renderResults(estimate, sim, hours, groundbaitConfig = null) {
   const noticeCount = stats ? stats.notices : estimate.expectedNotices;
   const falseSignals = stats ? stats.falseSignals : estimate.falseSignalRate * (estimate.effectiveTicks ?? fishingTicksForHours(hours));
   const snags = stats ? stats.snagEvents : estimate.snagEvents;
+  const equipmentBreaks = stats ? stats.equipmentBreaks : estimate.equipmentBreaks;
+  const escaped = stats ? stats.escaped : estimate.escapeEvents;
   const saleValue = stats ? stats.saleValue : estimateSaleValue(estimate);
   const weightStats = stats ? simulationWeightStats(stats, hours) : estimateWeightStats(estimate, hours);
   const activeFishingFactor = stats ? clamp((sim?.ticks || 0) / Math.max(fishingTicksForHours(hours, true), 1)) : estimate.fishingTimeFactor ?? 1;
   const groundbaitLabel = groundbaitSummary(groundbaitConfig, estimate.presentation);
   const tension = tensionSafetySummary(estimate.presentation);
+  const breakPart = stats ? dominantBreakPart(stats.breakParts) || estimate.presentation.tackleSafety.weakPart : estimate.breakPart;
   els.subtitle.textContent = `${ROD_LABELS[estimate.presentation.rodType]} · ${getRegion().name} / ${getSpot(getRegion()).name} · 全天候均值${groundbaitLabel ? ` · ${groundbaitLabel}` : ""} · ${hours} 小时${stats ? "随机模拟" : "期望估算"}`;
   els.summary.innerHTML = [
     summaryCard("成功起鱼", catches.toFixed(stats ? 0 : 1), `${(catches / hours).toFixed(2)} 条/小时`),
     summaryCard("实咬次数", biteCount.toFixed(stats ? 0 : 1), `遭遇率 ${(estimate.encounterRate * 100).toFixed(1)}% / tick`),
     summaryCard("鱼讯总数", noticeCount.toFixed(stats ? 0 : 1), `含误判 ${falseSignals.toFixed(stats ? 0 : 1)} 次`),
     summaryCard("摩擦片张力", tension.value, tension.note),
+    summaryCard("装备风险", `爆装 ${equipmentBreaks.toFixed(stats ? 0 : 1)}`, `逃鱼 ${escaped.toFixed(stats ? 0 : 1)} 次 · 高风险 ${tensionPartLabel(breakPart)}`),
     summaryCard(stats ? "模拟重量" : "估算重量", formatWeightKg(weightStats.totalWeightKg), `${formatWeightKg(weightStats.kgPerHour)}/小时 · 大鱼 ${formatCatchCount(weightStats.heavyCatch)} 条 · 有效作钓 ${(activeFishingFactor * 100).toFixed(0)}%`),
     summaryCard("估算金币", money(saleValue), `保守鱼价 · 仅供参考 · 挂底约 ${snags.toFixed(stats ? 0 : 1)} 次`),
   ].join("");
 
   const rows = stats
     ? Array.from(stats.fish.values()).sort((a, b) => b.count - a.count).map((row) => ({ label: row.fish.name, value: row.count, note: `${formatWeightKg(row.totalWeightKg)} · ${money(row.value)} 金` }))
-    : estimate.fishRows.filter((row) => row.catch > 0.02).map((row) => ({ label: row.fish.name, value: row.catch, note: `${formatWeightKg(rowExpectedTotalWeight(row))} · ${row.evals.reelingSuccess.toPercent(0)} 起鱼` }));
+    : estimate.fishRows.filter((row) => row.catch > 0.02 || row.equipmentBreak > 0.02).map((row) => ({ label: row.fish.name, value: row.catch, note: `${formatWeightKg(rowExpectedTotalWeight(row))} · ${row.evals.reelingSuccess.toPercent(0)} 起鱼 · 爆装 ${row.equipmentBreak.toFixed(1)}` }));
   renderDistribution(rows);
   scheduleMapRevenueRanking(state.loadout, state.controls, currentLevel(), hours);
 }
@@ -2425,14 +2585,16 @@ function mapRevenueTopRows(loadout, controls, level, hours) {
         saleValue,
         salePerHour: saleValue / Math.max(hours, 1),
         weightStats,
+        equipmentBreaks: estimate.equipmentBreaks,
+        riskScore: riskAdjustedWeightScore(estimate, hours),
         catchPerHour: estimate.catchPerHour,
         groundbaitLabel: groundbaitSummary(groundbaitConfig, estimate.presentation),
       };
-      if (!best || row.weightStats.scorePerHour > best.weightStats.scorePerHour) best = row;
+      if (!best || row.riskScore > best.riskScore) best = row;
     }
     if (best) rows.push(best);
   }
-  return rows.sort((a, b) => b.weightStats.scorePerHour - a.weightStats.scorePerHour).slice(0, 3);
+  return rows.sort((a, b) => b.riskScore - a.riskScore).slice(0, 3);
 }
 
 function scheduleMapRevenueRanking(loadout, controls, level, hours) {
@@ -2483,7 +2645,7 @@ function renderMapRevenueRanking(rows) {
         </span>
         <span class="map-revenue-value">
           <strong>${formatWeightKg(row.weightStats.kgPerHour)}/小时</strong>
-          <small>大鱼 ${formatCatchCount(row.weightStats.heavyCatch)} 条 · ${row.catchPerHour.toFixed(2)} 条/h · 约 ${money(row.salePerHour)} 金/h</small>
+          <small>大鱼 ${formatCatchCount(row.weightStats.heavyCatch)} 条 · ${row.catchPerHour.toFixed(2)} 条/h · 爆装 ${(row.equipmentBreaks / Math.max(row.weightStats.hours, 1)).toFixed(2)} 次/h · 约 ${money(row.salePerHour)} 金/h</small>
         </span>
       </div>
     `).join("")}
@@ -2548,8 +2710,8 @@ function init() {
   tuneControlsForCurrentLoadout();
   bindEvents();
   updateTimeOutput();
-  renderRecommendations();
   runSimulation(false);
+  scheduleRenderRecommendations();
 }
 
 function bindEvents() {

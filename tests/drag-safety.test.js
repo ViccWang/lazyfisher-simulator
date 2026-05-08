@@ -215,6 +215,17 @@ assert(
   `过高摩擦片比例应该因为超过薄弱点张力而降低起鱼率，当前 safe=${safeDrag}, over=${overDrag}`,
 );
 
+const giantFish = { weightMin: 80, weightMax: 80, strength: 5, endurance: 5, agility: 3 };
+const giantOutcome = reelingOutcomeProfile(presentationWithDrag(0.95), giantFish, poolEntry, env, 80);
+assert(
+  giantOutcome.breakChance > 0.5,
+  `重鱼超过薄弱点时应该有明显爆装概率，当前=${giantOutcome.breakChance}`,
+);
+assert(
+  giantOutcome.reelingSuccess < 0.1,
+  `重鱼爆装风险应压低实际起鱼率，当前=${giantOutcome.reelingSuccess}`,
+);
+
 const weakLineBottomLoadout = {
   rod: "tideforge_bf660_oceanlord_bottom",
   reel: "harborforge_drum_9000",
@@ -242,6 +253,26 @@ const tunedWeakLine = bestControlsForLoadout(
 assert(
   tunedWeakLine.controls.dragRatio < 0.2,
   `弱线配大轮时自动调参应该选低摩擦片安全档，当前=${tunedWeakLine.controls.dragRatio}`,
+);
+
+const fragileLanchaoEstimate = estimateLoadout(
+  weakLineBottomLoadout,
+  defaultControls({ throwDistance: 20, dragRatio: 0.7, reelSpeed: 1 }),
+  lanchaoBoatRegion,
+  getWeather(lanchaoBoatRegion),
+  36,
+  8,
+  1.2,
+  currentGroundbaitConfig(weakLineBottomLoadout, lanchaoBoatRegion),
+);
+assert(
+  fragileLanchaoEstimate.equipmentBreaks > 1,
+  `弱线进蓝潮岬应该统计大鱼爆装/断线风险，当前=${fragileLanchaoEstimate.equipmentBreaks}`,
+);
+renderResults(fragileLanchaoEstimate, null, 8, currentGroundbaitConfig(weakLineBottomLoadout, lanchaoBoatRegion));
+assert(
+  els.summary.innerHTML.includes("爆装"),
+  `模拟结果摘要应该显示装备损坏风险，当前=${els.summary.innerHTML}`,
 );
 
 console.log("drag-safety-ok");
