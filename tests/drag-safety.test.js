@@ -189,6 +189,18 @@ assert(
   els.summary.innerHTML.includes("含误判 8.5 次"),
   `误判次数也应该按有效作钓时间缩放，当前摘要=${els.summary.innerHTML}`,
 );
+assert.doesNotThrow(() => {
+  const randomSimulation = simulate(
+    observedMatchLoadout,
+    observedMatchControls,
+    lanchaoBoatRegion,
+    getWeather(lanchaoBoatRegion),
+    36,
+    8,
+    currentGroundbaitConfig(observedMatchLoadout, lanchaoBoatRegion),
+  );
+  assert(randomSimulation?.stats, "随机模拟应该返回统计结果");
+}, "点击开始模拟对应的随机模拟不应该抛错");
 
 const safeDrag = reelingSuccessRate(presentationWithDrag(0.45), fish, poolEntry, env);
 const overDrag = reelingSuccessRate(presentationWithDrag(0.95), fish, poolEntry, env);

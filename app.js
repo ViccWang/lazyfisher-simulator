@@ -2007,7 +2007,7 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
       waitSeconds += FISHING_TICK_SECONDS;
       continue;
     }
-    const groundbaitFactor = groundbaitMultiplier(groundbaitConfig, presentation, row.fish, tick * FISHING_TICK_SECONDS);
+    const groundbaitFactor = groundbaitMultiplier(groundbaitConfig, presentation, row.fish, elapsedSeconds);
     const evals = evaluateFish(presentation, row.fish, row.entry, region, env, waitMultiplier, groundbaitFactor);
     if (Math.random() >= evals.notice) {
       waitSeconds += FISHING_TICK_SECONDS;
