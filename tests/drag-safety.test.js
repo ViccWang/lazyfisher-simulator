@@ -184,6 +184,11 @@ assert(
   observedWeight < 1400,
   `高密度重鱼图必须扣除 BITE_WINDOW/REELING 占用时间；这套实测约 1000kg/8h，模拟不应仍到 2000kg+，当前=${observedWeight}`,
 );
+const observedSaleValue = estimateSaleValue(observedEstimate);
+assert(
+  observedSaleValue < 150000,
+  `蓝潮岬重鱼图的兜底鱼价不能把 1000kg 出头估到接近 20w 金，当前=${observedSaleValue}`,
+);
 renderResults(observedEstimate, null, 8, currentGroundbaitConfig(observedMatchLoadout, lanchaoBoatRegion));
 assert(
   els.summary.innerHTML.includes("含误判 8.5 次"),

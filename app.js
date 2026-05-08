@@ -48,6 +48,17 @@ const RATING_MULTIPLIERS = Object.freeze({
   epic: 5,
   legendary: 10,
 });
+const FISH_VALUE_PER_KG_BY_RARITY = Object.freeze({
+  common: 8,
+  uncommon: 14,
+  rare: 42,
+  epic: 90,
+  legendary: 185,
+  mythic: 280,
+});
+const FISH_VALUE_SIZE_FACTOR_EXPONENT = 0.12;
+const FISH_VALUE_SIZE_FACTOR_MIN = 0.8;
+const FISH_VALUE_SIZE_FACTOR_MAX = 2;
 const EXPECTED_RATING_MULTIPLIER =
   0.38 * RATING_MULTIPLIERS.below +
   0.52 * RATING_MULTIPLIERS.standard +
@@ -346,15 +357,45 @@ function averageRange(range, fallback) {
 }
 
 function fishValuePerKg(item) {
-  const officialValue = item.base_value_per_kg ?? item.value_per_kg ?? item.sell_value_per_kg ?? item.base_price_per_kg;
-  if (Number.isFinite(officialValue) && officialValue > 0) return officialValue;
-  return rarityBaseValue(item);
+  const officialPerKg = firstPositiveNumber(
+    item.base_value_per_kg,
+    item.value_per_kg,
+    item.sell_value_per_kg,
+    item.sale_value_per_kg,
+    item.base_price_per_kg,
+  );
+  if (officialPerKg !== null) return officialPerKg;
+
+  const officialPerFish = firstPositiveNumber(
+    item.base_sale_value,
+    item.sale_value,
+    item.sell_value,
+    item.base_price,
+  );
+  if (officialPerFish !== null) return officialPerFish / fishBaselineWeight(item);
+
+  return estimatedFishValuePerKg(item);
 }
 
-function rarityBaseValue(item) {
-  const rarity = { common: 10, uncommon: 18, rare: 34, epic: 70, legendary: 150, mythic: 260 }[item.rarity] ?? 14;
-  const size = avg([item.weight_min_kg ?? 0.01, item.weight_max_kg ?? 0.1]);
-  return rarity * Math.max(0.12, size ** 0.35);
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const numberValue = Number(value);
+    if (Number.isFinite(numberValue) && numberValue > 0) return numberValue;
+  }
+  return null;
+}
+
+function fishBaselineWeight(item) {
+  const minWeight = Number(item.weight_min_kg ?? 0.01);
+  const maxWeight = Number(item.weight_max_kg ?? item.weight_min_kg ?? 0.1);
+  return Math.max(0.05, avg([minWeight, maxWeight]));
+}
+
+function estimatedFishValuePerKg(item) {
+  const rarityValue = FISH_VALUE_PER_KG_BY_RARITY[item.rarity] ?? 16;
+  const size = fishBaselineWeight(item);
+  const sizeFactor = clamp(size ** FISH_VALUE_SIZE_FACTOR_EXPONENT, FISH_VALUE_SIZE_FACTOR_MIN, FISH_VALUE_SIZE_FACTOR_MAX);
+  return rarityValue * sizeFactor;
 }
 
 function hookTypeSnag(type) {
@@ -2165,7 +2206,7 @@ function renderResults(estimate, sim, hours, groundbaitConfig = null) {
     summaryCard("鱼讯总数", noticeCount.toFixed(stats ? 0 : 1), `含误判 ${falseSignals.toFixed(stats ? 0 : 1)} 次`),
     summaryCard("摩擦片张力", tension.value, tension.note),
     summaryCard(stats ? "模拟重量" : "估算重量", formatWeightKg(weightStats.totalWeightKg), `${formatWeightKg(weightStats.kgPerHour)}/小时 · 大鱼 ${formatCatchCount(weightStats.heavyCatch)} 条 · 有效作钓 ${(activeFishingFactor * 100).toFixed(0)}%`),
-    summaryCard("估算金币", money(saleValue), `仅供参考 · 挂底约 ${snags.toFixed(stats ? 0 : 1)} 次`),
+    summaryCard("估算金币", money(saleValue), `保守鱼价 · 仅供参考 · 挂底约 ${snags.toFixed(stats ? 0 : 1)} 次`),
   ].join("");
 
   const rows = stats
