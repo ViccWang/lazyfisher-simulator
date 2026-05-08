@@ -100,6 +100,12 @@ const fish = { weightMin: 6, weightMax: 6, strength: 2.4, endurance: 1.2 };
 const poolEntry = { sizeModifier: 1 };
 const env = { wind: 0, waterFlow: 0 };
 
+assert.strictEqual(
+  reelingFishStaminaMax({ endurance: 2, agility: 3 }, 10),
+  31.6,
+  "鱼最大体力应同步官网 2026-05-07 21:18 公式，把 m_init 系数更新为 1.5",
+);
+
 const safeDrag = reelingSuccessRate(presentationWithDrag(0.45), fish, poolEntry, env);
 const overDrag = reelingSuccessRate(presentationWithDrag(0.95), fish, poolEntry, env);
 

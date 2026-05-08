@@ -20,13 +20,15 @@ const LURE_ACTION_LABELS = {
 };
 
 const AVERAGE_TIME_MATCH_CACHE = new Map();
-const FORMULA_LAST_UPDATED = "2026-05-07 16:30";
+const FORMULA_LAST_UPDATED = "2026-05-07 21:18";
 const FISHING_TICK_SECONDS = 60;
 const FISHING_TICKS_PER_HOUR = 3600 / FISHING_TICK_SECONDS;
 const ENCOUNTER_FISHING_INTERVAL_BITE_RATE_MULTIPLIER = 1;
 const WAITING_BITE_STEP_SECONDS = 900;
 const WAITING_BITE_MULTIPLIER_CAP = 16;
 const LINE_CUT_LINE_OUT_LIMIT_MAX_M = 2000;
+const REELING_FISH_STAMINA_WEIGHT_COEFFICIENT = 1.5;
+const PREVIOUS_REELING_FISH_STAMINA_WEIGHT_COEFFICIENT = 2.2;
 const SIM_OWNED_SHIP_REGION_ID = "sim_owned_ship_exclusive";
 const GROUNDBAIT_MAX_AMOUNT = 3000;
 const GROUNDBAIT_DECAY_SECONDS = 7200;
@@ -1204,8 +1206,15 @@ function preferenceMatch(presentation, fishObj) {
 
 function reelingSuccessRate(presentation, fishObj, poolEntry, env) {
   const items = presentation.items;
-  const meanWeight = avg([fishObj.weightMin, fishObj.weightMax]) * (poolEntry?.sizeModifier ?? 1);
-  const fishLoad = Math.max(0.2, meanWeight * (0.72 + 0.24 * fishObj.strength + 0.12 * fishObj.endurance));
+  const initialWeight = fishInitialMassEstimate(fishObj, poolEntry);
+  const staminaNow = reelingFishStaminaMax(fishObj, initialWeight);
+  const staminaBeforeUpdate = reelingFishStaminaMax(
+    fishObj,
+    initialWeight,
+    PREVIOUS_REELING_FISH_STAMINA_WEIGHT_COEFFICIENT,
+  );
+  const staminaWeightScale = clamp(staminaNow / Math.max(staminaBeforeUpdate, 5), 0.65, 1.05);
+  const fishLoad = Math.max(0.2, initialWeight * (0.72 + 0.24 * fishObj.strength + 0.12 * fishObj.endurance) * staminaWeightScale);
   const safety = tackleSafetyProfile(items, presentation.controls);
   const appliedTension = items.reel ? Math.min(fishLoad, Math.max(safety.dragTension, 0.05)) : fishLoad;
   const stressRatio = appliedTension / Math.max(safety.weakTension, 0.1);
@@ -1221,6 +1230,20 @@ function reelingSuccessRate(presentation, fishObj, poolEntry, env) {
   const lineCutLineOutLimitM = presentation.controls.lineCutLineOutLimitM ?? presentation.controls.lineCutOut ?? 0;
   const cutPenalty = lineCutLineOutLimitM > 0 && presentation.actualCast > lineCutLineOutLimitM ? 0.14 : 0;
   return clamp(0.08 + 0.42 * strengthScore + 0.18 * staminaScore + 0.14 * lineReserve + 0.12 * presentation.reelPower + 0.06 * presentation.hookPower - weatherPenalty - cutPenalty - 0.52 * safetyPenalty, 0.02, 0.98);
+}
+
+function fishInitialMassEstimate(fishObj, poolEntry) {
+  const minWeight = Math.max(0, Number(fishObj?.weightMin) || 0);
+  const maxWeight = Math.max(minWeight, Number(fishObj?.weightMax) || minWeight);
+  const sizeModifier = poolEntry?.sizeModifier ?? 1;
+  return (0.35 * minWeight + 0.65 * maxWeight) * sizeModifier;
+}
+
+function reelingFishStaminaMax(fishObj, initialWeight, weightCoefficient = REELING_FISH_STAMINA_WEIGHT_COEFFICIENT) {
+  const endurance = Math.max(0, Number(fishObj?.endurance) || 0);
+  const agility = Math.max(0, Number(fishObj?.agility) || 0);
+  const mass = Math.max(0, Number(initialWeight) || 0);
+  return Math.max(5, 6.5 * endurance + weightCoefficient * mass + 1.2 * agility);
 }
 
 function tackleSafetyProfile(items, controls) {
