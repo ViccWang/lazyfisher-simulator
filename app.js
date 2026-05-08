@@ -29,6 +29,10 @@ const WAITING_BITE_MULTIPLIER_CAP = 16;
 const LINE_CUT_LINE_OUT_LIMIT_MAX_M = 2000;
 const REELING_FISH_STAMINA_WEIGHT_COEFFICIENT = 1.5;
 const PREVIOUS_REELING_FISH_STAMINA_WEIGHT_COEFFICIENT = 2.2;
+const SIMULATION_DEBOUNCE_MS = 90;
+const AUTO_TUNE_DEBOUNCE_MS = 120;
+const RECOMMENDATION_DEBOUNCE_MS = 80;
+const MAP_REVENUE_DEBOUNCE_MS = 140;
 const SIM_OWNED_SHIP_REGION_ID = "sim_owned_ship_exclusive";
 const GROUNDBAIT_MAX_AMOUNT = 3000;
 const GROUNDBAIT_DECAY_SECONDS = 7200;
@@ -48,6 +52,12 @@ const EXPECTED_RATING_MULTIPLIER =
   0.0005 * RATING_MULTIPLIERS.legendary;
 const EXPECTED_WEIGHT_SAMPLE_COUNT = 64;
 const DATA = normalizeGameData(window.LAZYFISHER_GAME_DATA);
+
+let simulationTimer = null;
+let autoTuneTimer = null;
+let recommendationTimer = null;
+let mapRevenueTimer = null;
+let mapRevenueRequestId = 0;
 
 
 function normalizeGameData(raw) {
@@ -2034,11 +2044,46 @@ function runSimulation(useRandom = true) {
   renderResults(estimate, sim, hours, groundbaitConfig);
 }
 
+function scheduleRunSimulation(useRandom = false, delay = SIMULATION_DEBOUNCE_MS) {
+  if (simulationTimer) clearTimeout(simulationTimer);
+  simulationTimer = deferTask(() => {
+    simulationTimer = null;
+    runSimulation(useRandom);
+  }, delay);
+}
+
+function scheduleAutoTuneAndSimulation({ recommendations = false } = {}) {
+  if (autoTuneTimer) clearTimeout(autoTuneTimer);
+  els.subtitle.textContent = "正在自动调校参数...";
+  autoTuneTimer = deferTask(() => {
+    autoTuneTimer = null;
+    tuneControlsForCurrentLoadout();
+    if (recommendations) scheduleRenderRecommendations();
+    runSimulation(false);
+  }, AUTO_TUNE_DEBOUNCE_MS);
+}
+
+function scheduleRenderRecommendations(delay = RECOMMENDATION_DEBOUNCE_MS) {
+  if (recommendationTimer) clearTimeout(recommendationTimer);
+  els.recommendMeta.textContent = "等待重算";
+  recommendationTimer = deferTask(() => {
+    recommendationTimer = null;
+    renderRecommendations();
+  }, delay);
+}
+
+function deferTask(callback, delay) {
+  const timer = setTimeout(callback, delay);
+  if (timer && typeof timer.unref === "function") timer.unref();
+  return timer;
+}
+
 function renderResults(estimate, sim, hours, groundbaitConfig = null) {
   if (!estimate) {
     els.summary.innerHTML = `<div class="empty-state">钓组不完整，无法模拟。</div>`;
     els.distribution.innerHTML = "";
     els.mapRevenue.innerHTML = "";
+    cancelMapRevenueRanking();
     return;
   }
   const stats = sim?.stats;
@@ -2065,7 +2110,7 @@ function renderResults(estimate, sim, hours, groundbaitConfig = null) {
     ? Array.from(stats.fish.values()).sort((a, b) => b.count - a.count).map((row) => ({ label: row.fish.name, value: row.count, note: `${formatWeightKg(row.totalWeightKg)} · ${money(row.value)} 金` }))
     : estimate.fishRows.filter((row) => row.catch > 0.02).map((row) => ({ label: row.fish.name, value: row.catch, note: `${formatWeightKg(rowExpectedTotalWeight(row))} · ${row.evals.reelingSuccess.toPercent(0)} 起鱼` }));
   renderDistribution(rows);
-  renderMapRevenueRanking(mapRevenueTopRows(state.loadout, state.controls, currentLevel(), hours));
+  scheduleMapRevenueRanking(state.loadout, state.controls, currentLevel(), hours);
 }
 
 function summaryCard(label, value, note) {
@@ -2287,6 +2332,35 @@ function mapRevenueTopRows(loadout, controls, level, hours) {
   return rows.sort((a, b) => b.weightStats.scorePerHour - a.weightStats.scorePerHour).slice(0, 3);
 }
 
+function scheduleMapRevenueRanking(loadout, controls, level, hours) {
+  cancelMapRevenueRanking(false);
+  const requestId = ++mapRevenueRequestId;
+  const loadoutSnapshot = { ...loadout };
+  const controlsSnapshot = { ...controls };
+  const safeHours = clamp(Number(hours), 1, 72);
+  renderMapRevenuePending();
+  mapRevenueTimer = deferTask(() => {
+    mapRevenueTimer = null;
+    if (requestId !== mapRevenueRequestId) return;
+    renderMapRevenueRanking(mapRevenueTopRows(loadoutSnapshot, controlsSnapshot, level, safeHours));
+  }, MAP_REVENUE_DEBOUNCE_MS);
+}
+
+function cancelMapRevenueRanking(incrementRequest = true) {
+  if (mapRevenueTimer) clearTimeout(mapRevenueTimer);
+  mapRevenueTimer = null;
+  if (incrementRequest) mapRevenueRequestId += 1;
+}
+
+function renderMapRevenuePending() {
+  els.mapRevenue.innerHTML = `
+    <div class="map-revenue-head">
+      <strong>当前装备地图收益 Top 3</strong>
+      <span>计算中...</span>
+    </div>
+  `;
+}
+
 function renderMapRevenueRanking(rows) {
   if (!rows.length) {
     els.mapRevenue.innerHTML = "";
@@ -2378,10 +2452,11 @@ function init() {
 function bindEvents() {
   els.time.addEventListener("input", () => {
     updateTimeOutput();
-    runSimulation(false);
+    scheduleRunSimulation(false);
   });
   els.drag.addEventListener("input", () => {
     els.dragOutput.textContent = Number(els.drag.value).toFixed(2);
+    scheduleRunSimulation(false);
   });
   els.recommendBtn.addEventListener("click", renderRecommendations);
   els.simulateBtn.addEventListener("click", () => runSimulation(true));
@@ -2391,7 +2466,7 @@ function bindEvents() {
   els.resetControls.addEventListener("click", () => {
     state.controls = defaultControls();
     syncControlsToInputs();
-    runSimulation(false);
+    scheduleRunSimulation(false);
   });
   for (const el of [els.region, els.spot, els.level, els.hours, els.proficiency, els.weather]) {
     el.addEventListener("change", () => {
@@ -2399,21 +2474,22 @@ function bindEvents() {
       if (el === els.region) updateGroundbaitControls();
       normalizeLoadout(state.rodType);
       renderManualFields();
-      if (el === els.region || el === els.spot || el === els.level) tuneControlsForCurrentLoadout();
-      renderRecommendations();
-      runSimulation(false);
+      if (el === els.region || el === els.spot || el === els.level) {
+        scheduleAutoTuneAndSimulation({ recommendations: true });
+      } else {
+        scheduleRenderRecommendations();
+        scheduleRunSimulation(false);
+      }
     });
   }
   for (const el of [els.groundbaitMode, els.groundbaitType, els.groundbaitAmount]) {
     el.addEventListener("change", () => {
       updateGroundbaitControls();
-      tuneControlsForCurrentLoadout();
-      renderRecommendations();
-      runSimulation(false);
+      scheduleAutoTuneAndSimulation({ recommendations: true });
     });
   }
   for (const el of [els.cast, els.float, els.drag, els.reelSpeed, els.lureAction, els.lineCutRound, els.lineCut]) {
-    el.addEventListener("change", () => runSimulation(false));
+    el.addEventListener("change", () => scheduleRunSimulation(false));
   }
   document.querySelectorAll(".loadout-tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -2421,8 +2497,7 @@ function bindEvents() {
       normalizeLoadout(state.rodType);
       renderTabs();
       renderManualFields();
-      tuneControlsForCurrentLoadout();
-      runSimulation(false);
+      scheduleAutoTuneAndSimulation();
     });
   });
   els.manualFields.addEventListener("change", (event) => {
@@ -2436,9 +2511,7 @@ function bindEvents() {
       renderTabs();
       renderManualFields();
     }
-    tuneControlsForCurrentLoadout();
-    renderRecommendations();
-    runSimulation(false);
+    scheduleAutoTuneAndSimulation();
   });
 }
 

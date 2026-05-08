@@ -125,6 +125,30 @@ assert(
   `同样总重量下，大鱼更多的套装收益评分应该更高，small=${smallFishYield.scorePerHour}, heavy=${heavyFishYield.scorePerHour}`,
 );
 
+const estimateForDeferredRevenue = estimateLoadout(
+  state.loadout,
+  state.controls,
+  getRegion(),
+  getWeather(getRegion()),
+  currentLevel(),
+  2,
+  1.2,
+  currentGroundbaitConfig(state.loadout, getRegion()),
+);
+const originalMapRevenueTopRows = mapRevenueTopRows;
+let syncMapRevenueCalls = 0;
+mapRevenueTopRows = () => {
+  syncMapRevenueCalls += 1;
+  return [];
+};
+renderResults(estimateForDeferredRevenue, null, 2, currentGroundbaitConfig(state.loadout, getRegion()));
+mapRevenueTopRows = originalMapRevenueTopRows;
+assert.strictEqual(
+  syncMapRevenueCalls,
+  0,
+  "结果渲染不应同步扫描所有地图收益，避免每次手动调装备/参数时卡顿",
+);
+
 const safeDrag = reelingSuccessRate(presentationWithDrag(0.45), fish, poolEntry, env);
 const overDrag = reelingSuccessRate(presentationWithDrag(0.95), fish, poolEntry, env);
 
