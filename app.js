@@ -1338,6 +1338,7 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
   const expectedBites = bitePerTick * ticks;
   const expectedNotices = noticePerTick * ticks + falseSignalRate * ticks;
   const catchPerHour = catchPerTick * FISHING_TICKS_PER_HOUR;
+  const sortedFishRows = fishRows.sort((a, b) => b.catch - a.catch);
   return {
     presentation,
     weights,
@@ -1349,7 +1350,8 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     encounterRate: weights.encounterRate,
     falseSignalRate,
     snagEvents,
-    fishRows: fishRows.sort((a, b) => b.catch - a.catch),
+    fishRows: sortedFishRows,
+    weightStats: estimateWeightStatsFromRows(sortedFishRows, hours),
   };
 }
 
@@ -1456,7 +1458,8 @@ function scoreRecommendation(loadout, controls, region, env, level, hours, groun
   const estimate = estimateLoadout(loadout, controls, region, env, level, hours, 1.2, groundbaitConfig);
   if (!estimate) return null;
   const riskPenalty = estimate.snagEvents / Math.max(hours, 1) * 0.08 + estimate.falseSignalRate * 0.22;
-  const score = estimate.catchPerHour * (1 - clamp(riskPenalty, 0, 0.35));
+  const weightStats = estimateWeightStats(estimate, hours);
+  const score = weightStats.scorePerHour * (1 - clamp(riskPenalty, 0, 0.35));
   return { loadout: { ...loadout }, controls: { ...controls }, estimate, score };
 }
 
@@ -1620,6 +1623,7 @@ function renderRecommendations() {
     const div = document.createElement("div");
     div.className = "recommendation";
     const itemNames = loadoutText(rec.loadout);
+    const weightStats = estimateWeightStats(rec.estimate, Number(els.hours.value));
     div.innerHTML = `
       <div class="rank">${index + 1}</div>
       <div class="rec-main">
@@ -1632,13 +1636,15 @@ function renderRecommendations() {
           <span>水层 ${LAYER_LABELS[rec.estimate.presentation.targetLayer]}</span>
           <span>抛距 ${rec.estimate.presentation.actualCast.toFixed(1)}m</span>
           <span>线深 ${rec.estimate.presentation.targetDepth.toFixed(1)}m</span>
+          <span>上鱼 ${rec.estimate.catchPerHour.toFixed(2)}条/h</span>
           <span>挂底 ${rec.estimate.presentation.snagRate.toPercent(1)}</span>
         </div>
       </div>
       <div class="rec-score">
-        <strong>${rec.estimate.catchPerHour.toFixed(2)}</strong>
-        <span>条/小时</span>
-        <span>${rec.estimate.expectedCatch.toFixed(1)} 条/${Number(els.hours.value)}h</span>
+        <strong>${weightStats.kgPerHour.toFixed(weightStats.kgPerHour >= 10 ? 1 : 2)}</strong>
+        <span>kg/小时</span>
+        <span>总重 ${formatWeightKg(weightStats.totalWeightKg)}</span>
+        <span>大鱼 ${formatCatchCount(weightStats.heavyCatch)} 条</span>
       </div>
     `;
     div.querySelector("button").addEventListener("click", () => applyRecommendation(rec));
@@ -1909,6 +1915,7 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
     escaped: 0,
     snagEvents: 0,
     saleValue: 0,
+    totalWeightKg: 0,
     fish: new Map(),
   };
   let waitSeconds = 0;
@@ -1947,9 +1954,11 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
           const catchInfo = rollCatch(row.fish, row.entry);
           stats.catches += 1;
           stats.saleValue += catchInfo.value;
-          const current = stats.fish.get(row.fish.id) || { fish: row.fish, count: 0, value: 0, maxWeight: 0 };
+          stats.totalWeightKg += catchInfo.weight;
+          const current = stats.fish.get(row.fish.id) || { fish: row.fish, count: 0, value: 0, totalWeightKg: 0, maxWeight: 0 };
           current.count += 1;
           current.value += catchInfo.value;
+          current.totalWeightKg += catchInfo.weight;
           current.maxWeight = Math.max(current.maxWeight, catchInfo.weight);
           stats.fish.set(row.fish.id, current);
         } else {
@@ -2039,6 +2048,7 @@ function renderResults(estimate, sim, hours, groundbaitConfig = null) {
   const falseSignals = stats ? stats.falseSignals : estimate.falseSignalRate * fishingTicksForHours(hours);
   const snags = stats ? stats.snagEvents : estimate.snagEvents;
   const saleValue = stats ? stats.saleValue : estimateSaleValue(estimate);
+  const weightStats = stats ? simulationWeightStats(stats, hours) : estimateWeightStats(estimate, hours);
   const groundbaitLabel = groundbaitSummary(groundbaitConfig, estimate.presentation);
   const tension = tensionSafetySummary(estimate.presentation);
   els.subtitle.textContent = `${ROD_LABELS[estimate.presentation.rodType]} · ${getRegion().name} / ${getSpot(getRegion()).name} · 全天候均值${groundbaitLabel ? ` · ${groundbaitLabel}` : ""} · ${hours} 小时${stats ? "随机模拟" : "期望估算"}`;
@@ -2047,12 +2057,13 @@ function renderResults(estimate, sim, hours, groundbaitConfig = null) {
     summaryCard("实咬次数", biteCount.toFixed(stats ? 0 : 1), `遭遇率 ${(estimate.encounterRate * 100).toFixed(1)}% / tick`),
     summaryCard("鱼讯总数", noticeCount.toFixed(stats ? 0 : 1), `含误判 ${falseSignals.toFixed(stats ? 0 : 1)} 次`),
     summaryCard("摩擦片张力", tension.value, tension.note),
-    summaryCard("估算金币", money(saleValue), `挂底约 ${snags.toFixed(stats ? 0 : 1)} 次`),
+    summaryCard(stats ? "模拟重量" : "估算重量", formatWeightKg(weightStats.totalWeightKg), `${formatWeightKg(weightStats.kgPerHour)}/小时 · 大鱼 ${formatCatchCount(weightStats.heavyCatch)} 条`),
+    summaryCard("估算金币", money(saleValue), `仅供参考 · 挂底约 ${snags.toFixed(stats ? 0 : 1)} 次`),
   ].join("");
 
   const rows = stats
-    ? Array.from(stats.fish.values()).sort((a, b) => b.count - a.count).map((row) => ({ label: row.fish.name, value: row.count, note: `${money(row.value)} 金` }))
-    : estimate.fishRows.filter((row) => row.catch > 0.02).map((row) => ({ label: row.fish.name, value: row.catch, note: `${row.evals.reelingSuccess.toPercent(0)} 起鱼` }));
+    ? Array.from(stats.fish.values()).sort((a, b) => b.count - a.count).map((row) => ({ label: row.fish.name, value: row.count, note: `${formatWeightKg(row.totalWeightKg)} · ${money(row.value)} 金` }))
+    : estimate.fishRows.filter((row) => row.catch > 0.02).map((row) => ({ label: row.fish.name, value: row.catch, note: `${formatWeightKg(rowExpectedTotalWeight(row))} · ${row.evals.reelingSuccess.toPercent(0)} 起鱼` }));
   renderDistribution(rows);
   renderMapRevenueRanking(mapRevenueTopRows(state.loadout, state.controls, currentLevel(), hours));
 }
@@ -2075,6 +2086,107 @@ function tensionPartLabel(part) {
 
 function estimateSaleValue(estimate) {
   return estimate.fishRows.reduce((sum, row) => sum + row.catch * expectedCatchValue(row.fish, row.entry), 0);
+}
+
+function estimateWeightStats(estimate, hours = 1) {
+  if (!estimate) return emptyWeightStats(hours);
+  if (estimate.weightStats && estimate.weightStats.hours === hours) return estimate.weightStats;
+  return estimateWeightStatsFromRows(estimate.fishRows || [], hours);
+}
+
+function estimateWeightStatsFromRows(fishRows, hours = 1) {
+  const safeHours = Math.max(Number(hours) || 1, 1);
+  const rows = (fishRows || [])
+    .map((row) => {
+      const catchCount = Math.max(0, Number(row.catch) || 0);
+      const expectedWeightKg = rowExpectedWeight(row);
+      return {
+        catch: catchCount,
+        expectedWeightKg,
+        totalWeightKg: catchCount * expectedWeightKg,
+      };
+    })
+    .filter((row) => row.catch > 0 && row.expectedWeightKg > 0);
+  if (!rows.length) return emptyWeightStats(safeHours);
+
+  const totalCatch = rows.reduce((sum, row) => sum + row.catch, 0);
+  const totalWeightKg = rows.reduce((sum, row) => sum + row.totalWeightKg, 0);
+  const qualityWeightedKg = rows.reduce((sum, row) => sum + row.totalWeightKg * Math.sqrt(row.expectedWeightKg), 0);
+  const averageWeightKg = totalWeightKg / Math.max(totalCatch, 1e-6);
+  const heavyThresholdKg = heavyFishThreshold(rows, averageWeightKg);
+  const heavyRows = rows.filter((row) => row.expectedWeightKg >= heavyThresholdKg);
+  const heavyCatch = heavyRows.reduce((sum, row) => sum + row.catch, 0);
+  const heavyWeightKg = heavyRows.reduce((sum, row) => sum + row.totalWeightKg, 0);
+  const kgPerHour = totalWeightKg / safeHours;
+  const qualityKgPerHour = qualityWeightedKg / safeHours;
+  const heavyCatchPerHour = heavyCatch / safeHours;
+  const scorePerHour = kgPerHour + qualityKgPerHour * 0.18 + heavyCatchPerHour * heavyThresholdKg * 0.35;
+
+  return {
+    hours: safeHours,
+    totalCatch,
+    totalWeightKg,
+    kgPerHour,
+    averageWeightKg,
+    heavyThresholdKg,
+    heavyCatch,
+    heavyWeightKg,
+    scorePerHour,
+  };
+}
+
+function simulationWeightStats(stats, hours = 1) {
+  const fishRows = Array.from(stats?.fish?.values?.() || []).map((row) => {
+    const averageWeight = row.count > 0 ? row.totalWeightKg / row.count : 0;
+    return {
+      catch: row.count,
+      fish: { weightMin: averageWeight, weightMax: averageWeight },
+      entry: { sizeModifier: 1 },
+    };
+  });
+  return estimateWeightStatsFromRows(fishRows, hours);
+}
+
+function emptyWeightStats(hours = 1) {
+  return {
+    hours,
+    totalCatch: 0,
+    totalWeightKg: 0,
+    kgPerHour: 0,
+    averageWeightKg: 0,
+    heavyThresholdKg: 0,
+    heavyCatch: 0,
+    heavyWeightKg: 0,
+    scorePerHour: 0,
+  };
+}
+
+function rowExpectedTotalWeight(row) {
+  return (Number(row?.catch) || 0) * rowExpectedWeight(row);
+}
+
+function rowExpectedWeight(row) {
+  if (!row?.fish) return 0;
+  return expectedCatchWeight(row.fish, row.entry);
+}
+
+function heavyFishThreshold(rows, averageWeightKg) {
+  const maxWeight = Math.max(...rows.map((row) => row.expectedWeightKg), 0);
+  if (!maxWeight) return 0;
+  const percentileWeight = weightedWeightPercentile(rows, 0.7);
+  return Math.min(maxWeight, Math.max(averageWeightKg * 1.35, percentileWeight));
+}
+
+function weightedWeightPercentile(rows, percentile) {
+  const sorted = [...rows].sort((a, b) => a.expectedWeightKg - b.expectedWeightKg);
+  const total = sorted.reduce((sum, row) => sum + row.catch, 0);
+  const target = total * clamp(percentile);
+  let cumulative = 0;
+  for (const row of sorted) {
+    cumulative += row.catch;
+    if (cumulative >= target) return row.expectedWeightKg;
+  }
+  return sorted[sorted.length - 1]?.expectedWeightKg ?? 0;
 }
 
 function expectedCatchValue(fishObj, poolEntry) {
@@ -2112,6 +2224,21 @@ function money(value) {
   return Number.isFinite(value) ? Math.round(value).toLocaleString("zh-CN") : "0";
 }
 
+function formatWeightKg(value) {
+  const kg = Math.max(0, Number(value) || 0);
+  if (kg < 1) return `${Math.round(kg * 1000)}g`;
+  if (kg < 10) return `${kg.toFixed(2)}kg`;
+  if (kg < 100) return `${kg.toFixed(1)}kg`;
+  return `${Math.round(kg).toLocaleString("zh-CN")}kg`;
+}
+
+function formatCatchCount(value) {
+  const count = Math.max(0, Number(value) || 0);
+  if (count >= 10) return count.toFixed(0);
+  if (count >= 1) return count.toFixed(1);
+  return count.toFixed(2);
+}
+
 function renderDistribution(rows) {
   if (!rows.length) {
     els.distribution.innerHTML = `<div class="empty-state">当前方案没有形成稳定上鱼分布。</div>`;
@@ -2122,7 +2249,10 @@ function renderDistribution(rows) {
     <div class="bar-row">
       <span class="bar-label" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span>
       <span class="bar-track"><span class="bar-fill" style="width:${clamp(row.value / max) * 100}%"></span></span>
-      <span>${Number(row.value).toFixed(row.value >= 10 ? 0 : 1)}</span>
+      <span class="bar-value">
+        <strong>${Number(row.value).toFixed(row.value >= 10 ? 0 : 1)}</strong>
+        ${row.note ? `<small>${escapeHtml(row.note)}</small>` : ""}
+      </span>
     </div>
   `).join("");
 }
@@ -2140,19 +2270,21 @@ function mapRevenueTopRows(loadout, controls, level, hours) {
       const estimate = withSpot(region, spot, () => estimateLoadout(loadout, controls, region, env, level, hours, 1.2, groundbaitConfig));
       if (!estimate) continue;
       const saleValue = estimateSaleValue(estimate);
+      const weightStats = estimateWeightStats(estimate, hours);
       const row = {
         region,
         spot,
         saleValue,
         salePerHour: saleValue / Math.max(hours, 1),
+        weightStats,
         catchPerHour: estimate.catchPerHour,
         groundbaitLabel: groundbaitSummary(groundbaitConfig, estimate.presentation),
       };
-      if (!best || row.salePerHour > best.salePerHour) best = row;
+      if (!best || row.weightStats.scorePerHour > best.weightStats.scorePerHour) best = row;
     }
     if (best) rows.push(best);
   }
-  return rows.sort((a, b) => b.salePerHour - a.salePerHour).slice(0, 3);
+  return rows.sort((a, b) => b.weightStats.scorePerHour - a.weightStats.scorePerHour).slice(0, 3);
 }
 
 function renderMapRevenueRanking(rows) {
@@ -2163,7 +2295,7 @@ function renderMapRevenueRanking(rows) {
   els.mapRevenue.innerHTML = `
     <div class="map-revenue-head">
       <strong>当前装备地图收益 Top 3</strong>
-      <span>按估算金币/小时排序</span>
+      <span>按重量收益评分排序</span>
     </div>
     ${rows.map((row, index) => `
       <div class="map-revenue-row">
@@ -2173,8 +2305,8 @@ function renderMapRevenueRanking(rows) {
           <small>${escapeHtml(row.spot.name)}${row.groundbaitLabel ? ` · ${escapeHtml(row.groundbaitLabel)}` : ""}</small>
         </span>
         <span class="map-revenue-value">
-          <strong>${money(row.salePerHour)}</strong>
-          <small>金/小时 · ${row.catchPerHour.toFixed(2)} 条/小时</small>
+          <strong>${formatWeightKg(row.weightStats.kgPerHour)}/小时</strong>
+          <small>大鱼 ${formatCatchCount(row.weightStats.heavyCatch)} 条 · ${row.catchPerHour.toFixed(2)} 条/h · 约 ${money(row.salePerHour)} 金/h</small>
         </span>
       </div>
     `).join("")}

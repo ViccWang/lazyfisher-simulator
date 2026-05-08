@@ -488,7 +488,7 @@ input[type="hidden"] {
 
 .bar-row {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr) 48px;
+  grid-template-columns: 88px minmax(0, 1fr) minmax(74px, auto);
   align-items: center;
   gap: 8px;
   font-size: 0.82rem;
@@ -512,6 +512,28 @@ input[type="hidden"] {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--blue), var(--green));
+}
+
+.bar-value {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  min-width: 0;
+  text-align: right;
+}
+
+.bar-value strong {
+  font-size: 0.82rem;
+}
+
+.bar-value small {
+  max-width: 116px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .map-revenue {
@@ -662,6 +684,6 @@ input[type="hidden"] {
   }
 
   .bar-row {
-    grid-template-columns: 72px minmax(0, 1fr) 42px;
+    grid-template-columns: 72px minmax(0, 1fr) minmax(64px, auto);
   }
 }

@@ -106,6 +106,25 @@ assert.strictEqual(
   "鱼最大体力应同步官网 2026-05-07 21:18 公式，把 m_init 系数更新为 1.5",
 );
 
+const smallFishYield = estimateWeightStats({
+  fishRows: [
+    { catch: 20, fish: { weightMin: 1, weightMax: 1 }, entry: { sizeModifier: 1 } },
+  ],
+}, 2);
+const heavyFishYield = estimateWeightStats({
+  fishRows: [
+    { catch: 2, fish: { weightMin: 10, weightMax: 10 }, entry: { sizeModifier: 1 } },
+  ],
+}, 2);
+assert.strictEqual(smallFishYield.totalWeightKg, 20, "重量收益应统计预期总重量");
+assert.strictEqual(smallFishYield.kgPerHour, 10, "重量收益应统计每小时重量");
+assert.strictEqual(heavyFishYield.totalWeightKg, 20, "高重量鱼方案也应保留同样总重量");
+assert.strictEqual(heavyFishYield.heavyCatch, 2, "高重量鱼数量应单独展示");
+assert(
+  heavyFishYield.scorePerHour > smallFishYield.scorePerHour,
+  `同样总重量下，大鱼更多的套装收益评分应该更高，small=${smallFishYield.scorePerHour}, heavy=${heavyFishYield.scorePerHour}`,
+);
+
 const safeDrag = reelingSuccessRate(presentationWithDrag(0.45), fish, poolEntry, env);
 const overDrag = reelingSuccessRate(presentationWithDrag(0.95), fish, poolEntry, env);
 
