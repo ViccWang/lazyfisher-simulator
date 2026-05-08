@@ -149,6 +149,42 @@ assert.strictEqual(
   "结果渲染不应同步扫描所有地图收益，避免每次手动调装备/参数时卡顿",
 );
 
+const observedMatchLoadout = {
+  rod: "aqualis_mr540_grand_match",
+  reel: "harborforge_drum_9000",
+  line: "braidcore_pe_45lb_stride",
+  leader: "stealthplus_sp18_leader",
+  hook: "trigrip_stinger_5_0",
+  bait: "small_fish_mid_cut_140",
+  float: "streamfloat_sf12",
+};
+const observedMatchControls = defaultControls({
+  throwDistance: 14.3,
+  floatLengthCm: 550,
+  dragRatio: 0.704,
+  reelSpeed: 1.25,
+  lureAction: "auto",
+  lineCutRoundLimit: 100,
+  lineCutLineOutLimitM: 0,
+  lineCutOut: 0,
+});
+const lanchaoBoatRegion = byId(DATA.regions, "boat_lanchao_shelf");
+const observedEstimate = estimateLoadout(
+  observedMatchLoadout,
+  observedMatchControls,
+  lanchaoBoatRegion,
+  getWeather(lanchaoBoatRegion),
+  36,
+  8,
+  1.2,
+  currentGroundbaitConfig(observedMatchLoadout, lanchaoBoatRegion),
+);
+const observedWeight = estimateWeightStats(observedEstimate, 8).totalWeightKg;
+assert(
+  observedWeight < 1400,
+  `高密度重鱼图必须扣除 BITE_WINDOW/REELING 占用时间；这套实测约 1000kg/8h，模拟不应仍到 2000kg+，当前=${observedWeight}`,
+);
+
 const safeDrag = reelingSuccessRate(presentationWithDrag(0.45), fish, poolEntry, env);
 const overDrag = reelingSuccessRate(presentationWithDrag(0.95), fish, poolEntry, env);
 

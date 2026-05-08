@@ -29,6 +29,10 @@ const WAITING_BITE_MULTIPLIER_CAP = 16;
 const LINE_CUT_LINE_OUT_LIMIT_MAX_M = 2000;
 const REELING_FISH_STAMINA_WEIGHT_COEFFICIENT = 1.5;
 const PREVIOUS_REELING_FISH_STAMINA_WEIGHT_COEFFICIENT = 2.2;
+const BITE_WINDOW_BASE_SECONDS = 4;
+const BITE_WINDOW_REACTION_TICK_SECONDS = 1.7;
+const REELING_STAMINA_SECONDS = 1.0;
+const REELING_MASS_SECONDS = 11;
 const SIMULATION_DEBOUNCE_MS = 90;
 const AUTO_TUNE_DEBOUNCE_MS = 120;
 const RECOMMENDATION_DEBOUNCE_MS = 80;
@@ -1242,6 +1246,42 @@ function reelingSuccessRate(presentation, fishObj, poolEntry, env) {
   return clamp(0.08 + 0.42 * strengthScore + 0.18 * staminaScore + 0.14 * lineReserve + 0.12 * presentation.reelPower + 0.06 * presentation.hookPower - weatherPenalty - cutPenalty - 0.52 * safetyPenalty, 0.02, 0.98);
 }
 
+function estimatedBiteWindowSeconds(presentation) {
+  const reactionTicks = Math.round((1 - clamp(presentation?.detectionScore ?? 0.5)) * 10);
+  const floatDepthFactor = presentation?.rodType === "hand_rod" || presentation?.rodType === "match_rod"
+    ? 1 + Math.max(0, (presentation.targetDepth ?? 0) - 1.5) * 0.14
+    : 1;
+  return clamp(BITE_WINDOW_BASE_SECONDS + reactionTicks * BITE_WINDOW_REACTION_TICK_SECONDS * floatDepthFactor, 4, 45);
+}
+
+function estimatedReelingSeconds(presentation, fishObj, poolEntry, evals = null) {
+  const initialWeight = fishInitialMassEstimate(fishObj, poolEntry);
+  const lineOut = initialLineOutMeters(presentation);
+  const reelSpeed = Math.max(0.15, Number(presentation?.controls?.reelSpeed) || 0.8);
+  const retrieve = reelSpeed *
+    (0.35 + 0.65 * (presentation?.reelPower ?? 0.5)) *
+    (0.45 + 0.55 * (presentation?.ctrl ?? 0.5));
+  const reelingSuccess = clamp(evals?.reelingSuccess ?? 0.6, 0.05, 0.98);
+  const fishStamina = reelingFishStaminaMax(fishObj, initialWeight);
+  return clamp(
+    15 +
+      lineOut / Math.max(retrieve, 0.15) * (1 + (1 - reelingSuccess) * 2) +
+      fishStamina * REELING_STAMINA_SECONDS +
+      Math.max(initialWeight, 0.1) ** 0.55 * REELING_MASS_SECONDS,
+    15,
+    480,
+  );
+}
+
+function initialLineOutMeters(presentation) {
+  const items = presentation?.items || {};
+  const lineLength = items.line?.length ?? 80;
+  const rodLength = items.rod?.length ?? 3;
+  const cast = presentation?.actualCast ?? 0;
+  const depth = presentation?.targetDepth ?? 0;
+  return Math.min(lineLength, Math.max(1, Math.sqrt(cast ** 2 + depth ** 2) + 0.35 * rodLength));
+}
+
 function fishInitialMassEstimate(fishObj, poolEntry) {
   const minWeight = Math.max(0, Number(fishObj?.weightMin) || 0);
   const maxWeight = Math.max(minWeight, Number(fishObj?.weightMax) || minWeight);
@@ -1319,6 +1359,7 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
   let catchPerTick = 0;
   let bitePerTick = 0;
   let noticePerTick = 0;
+  let busySecondsPerTick = 0;
   const fishRows = [];
 
   for (const row of weights.entries) {
@@ -1327,27 +1368,38 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     const pEncounterFish = weights.encounterRate * row.encounterShare;
     const pNotice = pEncounterFish * evals.notice;
     const pBite = pNotice * evals.bite;
-    const pCatch = pBite * evals.hookRate * evals.reelingSuccess * (1 - 0.22 * presentation.snagRate);
+    const pHook = pBite * evals.hookRate;
+    const pCatch = pHook * evals.reelingSuccess * (1 - 0.22 * presentation.snagRate);
     catchPerTick += pCatch;
     bitePerTick += pBite;
     noticePerTick += pNotice;
+    busySecondsPerTick += pNotice * estimatedBiteWindowSeconds(presentation);
+    busySecondsPerTick += pHook * estimatedReelingSeconds(presentation, row.fish, row.entry, evals);
     fishRows.push({
       fish: row.fish,
       entry: row.entry,
-      catch: pCatch * ticks,
-      bite: pBite * ticks,
-      notice: pNotice * ticks,
+      catch: pCatch,
+      bite: pBite,
+      notice: pNotice,
       share: pCatch,
       evals,
     });
   }
 
+  const fishingTimeFactor = FISHING_TICK_SECONDS / (FISHING_TICK_SECONDS + busySecondsPerTick);
+  const effectiveTicks = ticks * fishingTimeFactor;
+  for (const row of fishRows) {
+    row.catch *= effectiveTicks;
+    row.bite *= effectiveTicks;
+    row.notice *= effectiveTicks;
+    row.share *= fishingTimeFactor;
+  }
   const falseSignalRate = falseSignalChance(presentation, env);
-  const snagEvents = presentation.snagRate * 0.08 * ticks;
-  const expectedCatch = catchPerTick * ticks;
-  const expectedBites = bitePerTick * ticks;
-  const expectedNotices = noticePerTick * ticks + falseSignalRate * ticks;
-  const catchPerHour = catchPerTick * FISHING_TICKS_PER_HOUR;
+  const snagEvents = presentation.snagRate * 0.08 * effectiveTicks;
+  const expectedCatch = catchPerTick * effectiveTicks;
+  const expectedBites = bitePerTick * effectiveTicks;
+  const expectedNotices = noticePerTick * effectiveTicks + falseSignalRate * effectiveTicks;
+  const catchPerHour = catchPerTick * FISHING_TICKS_PER_HOUR * fishingTimeFactor;
   const sortedFishRows = fishRows.sort((a, b) => b.catch - a.catch);
   return {
     presentation,
@@ -1358,6 +1410,8 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     catchPerHour,
     biteRate: bitePerTick,
     encounterRate: weights.encounterRate,
+    fishingTimeFactor,
+    busySecondsPerTick,
     falseSignalRate,
     snagEvents,
     fishRows: sortedFishRows,
@@ -1915,7 +1969,7 @@ function renderTabs() {
 function simulate(loadout, controls, region, env, level, hours, groundbaitConfig = currentGroundbaitConfig(loadout, region)) {
   const presentation = buildPresentation(loadout, controls, region, env, level);
   if (!presentation) return null;
-  const ticks = fishingTicksForHours(hours, true);
+  const durationSeconds = Math.max(1, Number(hours) || 1) * 3600;
   const stats = {
     catches: 0,
     bites: 0,
@@ -1929,7 +1983,11 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
     fish: new Map(),
   };
   let waitSeconds = 0;
-  for (let tick = 0; tick < ticks; tick += 1) {
+  let elapsedSeconds = 0;
+  let ticks = 0;
+  while (elapsedSeconds < durationSeconds) {
+    elapsedSeconds += FISHING_TICK_SECONDS;
+    ticks += 1;
     const waitMultiplier = Math.min(2 ** Math.floor(waitSeconds / WAITING_BITE_STEP_SECONDS), WAITING_BITE_MULTIPLIER_CAP);
     if (Math.random() < presentation.snagRate * 0.08) stats.snagEvents += 1;
     const weights = candidateWeights(presentation, region, env, level);
@@ -1955,11 +2013,13 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
       continue;
     }
     stats.notices += 1;
+    elapsedSeconds += estimatedBiteWindowSeconds(presentation);
     const roll = Math.random();
     if (roll < evals.bite) {
       stats.bites += 1;
       waitSeconds = 0;
       if (Math.random() < evals.hookRate) {
+        elapsedSeconds += estimatedReelingSeconds(presentation, row.fish, row.entry, evals);
         if (Math.random() < evals.reelingSuccess * (1 - 0.22 * presentation.snagRate)) {
           const catchInfo = rollCatch(row.fish, row.entry);
           stats.catches += 1;
@@ -2094,6 +2154,7 @@ function renderResults(estimate, sim, hours, groundbaitConfig = null) {
   const snags = stats ? stats.snagEvents : estimate.snagEvents;
   const saleValue = stats ? stats.saleValue : estimateSaleValue(estimate);
   const weightStats = stats ? simulationWeightStats(stats, hours) : estimateWeightStats(estimate, hours);
+  const activeFishingFactor = stats ? clamp((sim?.ticks || 0) / Math.max(fishingTicksForHours(hours, true), 1)) : estimate.fishingTimeFactor ?? 1;
   const groundbaitLabel = groundbaitSummary(groundbaitConfig, estimate.presentation);
   const tension = tensionSafetySummary(estimate.presentation);
   els.subtitle.textContent = `${ROD_LABELS[estimate.presentation.rodType]} · ${getRegion().name} / ${getSpot(getRegion()).name} · 全天候均值${groundbaitLabel ? ` · ${groundbaitLabel}` : ""} · ${hours} 小时${stats ? "随机模拟" : "期望估算"}`;
@@ -2102,7 +2163,7 @@ function renderResults(estimate, sim, hours, groundbaitConfig = null) {
     summaryCard("实咬次数", biteCount.toFixed(stats ? 0 : 1), `遭遇率 ${(estimate.encounterRate * 100).toFixed(1)}% / tick`),
     summaryCard("鱼讯总数", noticeCount.toFixed(stats ? 0 : 1), `含误判 ${falseSignals.toFixed(stats ? 0 : 1)} 次`),
     summaryCard("摩擦片张力", tension.value, tension.note),
-    summaryCard(stats ? "模拟重量" : "估算重量", formatWeightKg(weightStats.totalWeightKg), `${formatWeightKg(weightStats.kgPerHour)}/小时 · 大鱼 ${formatCatchCount(weightStats.heavyCatch)} 条`),
+    summaryCard(stats ? "模拟重量" : "估算重量", formatWeightKg(weightStats.totalWeightKg), `${formatWeightKg(weightStats.kgPerHour)}/小时 · 大鱼 ${formatCatchCount(weightStats.heavyCatch)} 条 · 有效作钓 ${(activeFishingFactor * 100).toFixed(0)}%`),
     summaryCard("估算金币", money(saleValue), `仅供参考 · 挂底约 ${snags.toFixed(stats ? 0 : 1)} 次`),
   ].join("");
 
