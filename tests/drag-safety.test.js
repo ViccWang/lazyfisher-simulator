@@ -184,6 +184,11 @@ assert(
   observedWeight < 1400,
   `高密度重鱼图必须扣除 BITE_WINDOW/REELING 占用时间；这套实测约 1000kg/8h，模拟不应仍到 2000kg+，当前=${observedWeight}`,
 );
+renderResults(observedEstimate, null, 8, currentGroundbaitConfig(observedMatchLoadout, lanchaoBoatRegion));
+assert(
+  els.summary.innerHTML.includes("含误判 8.5 次"),
+  `误判次数也应该按有效作钓时间缩放，当前摘要=${els.summary.innerHTML}`,
+);
 
 const safeDrag = reelingSuccessRate(presentationWithDrag(0.45), fish, poolEntry, env);
 const overDrag = reelingSuccessRate(presentationWithDrag(0.95), fish, poolEntry, env);

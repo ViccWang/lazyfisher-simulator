@@ -1408,8 +1408,9 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     expectedBites,
     expectedNotices,
     catchPerHour,
-    biteRate: bitePerTick,
+    biteRate: bitePerTick * fishingTimeFactor,
     encounterRate: weights.encounterRate,
+    effectiveTicks,
     fishingTimeFactor,
     busySecondsPerTick,
     falseSignalRate,
@@ -2150,7 +2151,7 @@ function renderResults(estimate, sim, hours, groundbaitConfig = null) {
   const catches = stats ? stats.catches : estimate.expectedCatch;
   const biteCount = stats ? stats.bites : estimate.expectedBites;
   const noticeCount = stats ? stats.notices : estimate.expectedNotices;
-  const falseSignals = stats ? stats.falseSignals : estimate.falseSignalRate * fishingTicksForHours(hours);
+  const falseSignals = stats ? stats.falseSignals : estimate.falseSignalRate * (estimate.effectiveTicks ?? fishingTicksForHours(hours));
   const snags = stats ? stats.snagEvents : estimate.snagEvents;
   const saleValue = stats ? stats.saleValue : estimateSaleValue(estimate);
   const weightStats = stats ? simulationWeightStats(stats, hours) : estimateWeightStats(estimate, hours);
