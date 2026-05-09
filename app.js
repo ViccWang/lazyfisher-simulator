@@ -20,7 +20,15 @@ const LURE_ACTION_LABELS = {
 };
 
 const AVERAGE_TIME_MATCH_CACHE = new Map();
-const FORMULA_LAST_UPDATED = "2026-05-09 13:57";
+const FORMULA_LAST_UPDATED = "2026-05-09 21:02";
+const REGION_NOTICE_MULTIPLIER_OVERRIDES = Object.freeze({
+  seamount_edge: 2.1,
+  stormline_reef: 2,
+  hadal_canyon_gate: 3.3,
+  boat_yinlin_offshore: 1.7,
+  boat_crimson_trench: 4,
+  blackreef_dropoff: 1,
+});
 const FISHING_TICK_SECONDS = 60;
 const FISHING_TICKS_PER_HOUR = 3600 / FISHING_TICK_SECONDS;
 const ENCOUNTER_FISHING_INTERVAL_BITE_RATE_MULTIPLIER = 1;
@@ -39,6 +47,14 @@ const REELING_RAW_TENSION_REFERENCE_LOW_TENSION_KG = 44;
 const REELING_RAW_TENSION_REFERENCE_HIGH_WEIGHT_KG = 500;
 const REELING_RAW_TENSION_REFERENCE_HIGH_TENSION_KG = 76;
 const REELING_RAW_TENSION_OVERFLOW_PIVOT_KG = 38;
+const REELING_HEAVY_RETRIEVE_RESISTANCE_START_WEIGHT_KG = 60;
+const REELING_HEAVY_RETRIEVE_RESISTANCE_FULL_WEIGHT_KG = 240;
+const REELING_HEAVY_RETRIEVE_MIN_FACTOR = 0.38;
+const REELING_HEAVY_NORMAL_RETRIEVE_PRESSURE = 0.34;
+const REELING_HEAVY_SPRINT_RETRIEVE_PRESSURE = 0.64;
+const REELING_HIGH_REEL_PRESSURE_SPEED_START_MPS = 1.5;
+const REELING_HIGH_REEL_PRESSURE_SPEED_FULL_MPS = 3.5;
+const REELING_HIGH_REEL_TENSION_MULTIPLIER = 0.32;
 const BITE_WINDOW_BASE_SECONDS = 4;
 const BITE_WINDOW_REACTION_TICK_SECONDS = 1.7;
 const REELING_STAMINA_SECONDS = 1.0;
@@ -166,7 +182,7 @@ function normalizeRegion(item) {
     depthMax: item.depth_max ?? item.depth_min ?? 1,
     waterType: item.water_type || "freshwater",
     castOffset: item.cast_expectation_offset ?? 0,
-    noticeMultiplier: item.notice_multiplier ?? 1,
+    noticeMultiplier: REGION_NOTICE_MULTIPLIER_OVERRIDES[item.id] ?? item.notice_multiplier ?? 1,
     softLimitKg: item.soft_limit_kg ?? null,
     simulatorVirtual: item.simulator_virtual || null,
     recommendedStyles: item.recommended_styles || [],
@@ -1333,7 +1349,8 @@ function canUseCentralReelingOutcome(presentation, fishObj, poolEntry, central) 
 function reelingOutcomeProfile(presentation, fishObj, poolEntry, env, actualWeight = null) {
   const items = presentation.items;
   const initialWeight = Number.isFinite(actualWeight) && actualWeight > 0 ? actualWeight : fishInitialMassEstimate(fishObj, poolEntry);
-  const fishLoad = fishRawTensionEstimate(fishObj, initialWeight);
+  const pressure = highReelPressure(presentation);
+  const fishLoad = fishRawTensionEstimate(fishObj, initialWeight) * (1 + REELING_HIGH_REEL_TENSION_MULTIPLIER * pressure);
   const safety = tackleSafetyProfile(items, presentation.controls);
   const dragThreshold = items.reel ? Math.max(safety.dragTension, 0.05) : 0;
   const freeLine = Math.max(0, (items.line?.length ?? 80) - initialLineOutMeters(presentation));
@@ -1350,7 +1367,8 @@ function reelingOutcomeProfile(presentation, fishObj, poolEntry, env, actualWeig
   const overloadRisk = clamp((stressRatio - 0.82) / 0.38);
   const safetyPenalty = clamp(0.72 * breakChance + 0.28 * overloadRisk);
   const usableDrag = items.reel ? Math.min(Math.max(safety.dragTension, 0.05), safety.weakTension) : safety.weakTension;
-  const strengthScore = clamp((safety.weakTension + 0.55 * usableDrag) / Math.max(0.3, fishLoad * 1.3), 0, 1.35);
+  const heavyRetrieveFactor = heavyFishRetrieveResistanceFactor(initialWeight, pressure > 0.45);
+  const strengthScore = clamp((safety.weakTension + 0.55 * usableDrag) / Math.max(0.3, fishLoad * 1.3), 0, 1.35) * heavyRetrieveFactor;
   const staminaScore = clamp(0.34 + 0.32 * softcap(presentation.skills.endurance, 8) + 0.18 * softcap(presentation.skills.strength, 9) + 0.16 * presentation.ctrl);
   const lineReserve = clamp(items.line.length / Math.max(8, presentation.actualCast + presentation.targetDepth + items.rod.length));
   const weatherPenalty = 0.06 * clamp(env.wind / 8) + 0.04 * clamp(env.waterFlow / 2.5);
@@ -1414,6 +1432,23 @@ function lineLockedOverloadRisk(presentation, fishObj, weight, fishLoad, safety)
   return clamp((runDemand - freeLine) / Math.max(runDemand, 1));
 }
 
+function highReelPressure(presentation) {
+  const speed = Math.max(0, Number(presentation?.controls?.reelSpeed) || 0);
+  return clamp(
+    (speed - REELING_HIGH_REEL_PRESSURE_SPEED_START_MPS) /
+      Math.max(0.1, REELING_HIGH_REEL_PRESSURE_SPEED_FULL_MPS - REELING_HIGH_REEL_PRESSURE_SPEED_START_MPS),
+  );
+}
+
+function heavyFishRetrieveResistanceFactor(weight, sprinting = false) {
+  const heavyRatio = clamp(
+    (Math.max(0, Number(weight) || 0) - REELING_HEAVY_RETRIEVE_RESISTANCE_START_WEIGHT_KG) /
+      Math.max(1, REELING_HEAVY_RETRIEVE_RESISTANCE_FULL_WEIGHT_KG - REELING_HEAVY_RETRIEVE_RESISTANCE_START_WEIGHT_KG),
+  );
+  const pressure = sprinting ? REELING_HEAVY_SPRINT_RETRIEVE_PRESSURE : REELING_HEAVY_NORMAL_RETRIEVE_PRESSURE;
+  return clamp(1 - heavyRatio * pressure, REELING_HEAVY_RETRIEVE_MIN_FACTOR, 1);
+}
+
 function fishRunDemandMeters(presentation, fishObj, weight) {
   const mobility = 0.5 + 0.3 * clamp((fishObj?.agility ?? 1) / 5) + 0.2 * clamp((fishObj?.strength ?? 1) / 5);
   const controlRelief = 1.15 - 0.35 * clamp(presentation?.ctrl ?? 0.5);
@@ -1444,9 +1479,12 @@ function estimatedReelingSeconds(presentation, fishObj, poolEntry, evals = null)
   const initialWeight = fishInitialMassEstimate(fishObj, poolEntry);
   const lineOut = initialLineOutMeters(presentation);
   const reelSpeed = Math.max(0.15, Number(presentation?.controls?.reelSpeed) || 0.8);
+  const pressure = highReelPressure(presentation);
+  const heavyRetrieveFactor = heavyFishRetrieveResistanceFactor(initialWeight, pressure > 0.45);
   const retrieve = reelSpeed *
     (0.35 + 0.65 * (presentation?.reelPower ?? 0.5)) *
-    (0.45 + 0.55 * (presentation?.ctrl ?? 0.5));
+    (0.45 + 0.55 * (presentation?.ctrl ?? 0.5)) *
+    heavyRetrieveFactor;
   const reelingSuccess = clamp(evals?.reelingSuccess ?? 0.6, 0.05, 0.98);
   const fishStamina = reelingFishStaminaMax(fishObj, initialWeight);
   return clamp(

@@ -102,8 +102,8 @@ const env = { wind: 0, waterFlow: 0 };
 
 assert.strictEqual(
   FORMULA_LAST_UPDATED,
-  "2026-05-09 13:57",
-  "模拟器应标记为官网帮助页 2026-05-09 13:57 的公式版本",
+  "2026-05-09 21:02",
+  "模拟器应标记为官网帮助页 2026-05-09 21:02 的公式版本",
 );
 
 assert.strictEqual(
@@ -128,6 +128,21 @@ const autoDragSafety = tackleSafetyProfile(presentationWithDrag(0).items, presen
 assert(
   Math.abs(autoDragSafety.dragTension - autoDragSafety.weakTension * 0.8) < 1e-9,
   `摩擦片 0 应按薄弱点 80% 自动档解析，当前 drag=${autoDragSafety.dragTension}, weak=${autoDragSafety.weakTension}`,
+);
+
+assert.strictEqual(
+  byId(DATA.regions, "boat_yinlin_offshore").noticeMultiplier,
+  1.7,
+  "银鳞岛外海船钓应同步 2026-05-09 21:02 的地图 notice 倍率",
+);
+assert.strictEqual(
+  byId(DATA.regions, "boat_crimson_trench").noticeMultiplier,
+  4,
+  "赤湾深槽船钓应同步 2026-05-09 21:02 的地图 notice 倍率",
+);
+assert(
+  heavyFishRetrieveResistanceFactor(80, false) < 1,
+  `60kg 以上大鱼应按新版公式降低有效回线效率，当前=${heavyFishRetrieveResistanceFactor(80, false)}`,
 );
 
 const smallFishYield = estimateWeightStats({
