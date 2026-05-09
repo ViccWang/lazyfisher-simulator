@@ -20,15 +20,25 @@ const LURE_ACTION_LABELS = {
 };
 
 const AVERAGE_TIME_MATCH_CACHE = new Map();
-const FORMULA_LAST_UPDATED = "2026-05-07 21:18";
+const FORMULA_LAST_UPDATED = "2026-05-09 13:57";
 const FISHING_TICK_SECONDS = 60;
 const FISHING_TICKS_PER_HOUR = 3600 / FISHING_TICK_SECONDS;
 const ENCOUNTER_FISHING_INTERVAL_BITE_RATE_MULTIPLIER = 1;
 const WAITING_BITE_STEP_SECONDS = 900;
 const WAITING_BITE_MULTIPLIER_CAP = 16;
 const LINE_CUT_LINE_OUT_LIMIT_MAX_M = 2000;
+const FISH_WEIGHT_RATIO_SIZE_EXPONENT = 1.7;
+const CATCH_SIZE_RATIO_BASE = 0.52;
+const CATCH_SIZE_RATIO_LATENT_SCALE = 0.18;
+const CATCH_DENSITY_BASE = 0.88;
+const CATCH_DENSITY_LATENT_SCALE = 0.07;
 const REELING_FISH_STAMINA_WEIGHT_COEFFICIENT = 1.5;
-const PREVIOUS_REELING_FISH_STAMINA_WEIGHT_COEFFICIENT = 2.2;
+const REELING_RAW_TENSION_SOFTCAP_KG = 22;
+const REELING_RAW_TENSION_REFERENCE_LOW_WEIGHT_KG = 250;
+const REELING_RAW_TENSION_REFERENCE_LOW_TENSION_KG = 44;
+const REELING_RAW_TENSION_REFERENCE_HIGH_WEIGHT_KG = 500;
+const REELING_RAW_TENSION_REFERENCE_HIGH_TENSION_KG = 76;
+const REELING_RAW_TENSION_OVERFLOW_PIVOT_KG = 38;
 const BITE_WINDOW_BASE_SECONDS = 4;
 const BITE_WINDOW_REACTION_TICK_SECONDS = 1.7;
 const REELING_STAMINA_SECONDS = 1.0;
@@ -1325,18 +1335,20 @@ function reelingOutcomeProfile(presentation, fishObj, poolEntry, env, actualWeig
   const initialWeight = Number.isFinite(actualWeight) && actualWeight > 0 ? actualWeight : fishInitialMassEstimate(fishObj, poolEntry);
   const fishLoad = fishRawTensionEstimate(fishObj, initialWeight);
   const safety = tackleSafetyProfile(items, presentation.controls);
-  const appliedTension = items.reel ? Math.min(fishLoad, Math.max(safety.dragTension, 0.05)) : fishLoad;
+  const dragThreshold = items.reel ? Math.max(safety.dragTension, 0.05) : 0;
+  const freeLine = Math.max(0, (items.line?.length ?? 80) - initialLineOutMeters(presentation));
+  const releaseBranch = Boolean(items.reel && fishLoad > dragThreshold && freeLine > 0);
+  const releaseTension = releaseBranch ? Math.min(fishLoad, dragThreshold) : fishLoad;
+  const lockedLineRisk = releaseBranch ? lineLockedOverloadRisk(presentation, fishObj, initialWeight, fishLoad, safety) : 0;
+  const appliedTension = releaseTension * (1 - lockedLineRisk) + fishLoad * lockedLineRisk;
   const stressRatio = appliedTension / Math.max(safety.weakTension, 0.1);
-  const dragToWeakRatio = safety.dragTension / Math.max(safety.weakTension, 0.1);
+  const releaseStressRatio = releaseTension / Math.max(safety.weakTension, 0.1);
   const rawStressRatio = fishLoad / Math.max(safety.weakTension, 0.1);
-  const lockedLineRisk = lineLockedOverloadRisk(presentation, fishObj, initialWeight, fishLoad, safety);
-  const directBreakRisk = clamp((stressRatio - 1) / 0.35);
-  const lockedBreakRisk = lockedLineRisk * clamp((rawStressRatio - 1) / 1.15);
-  const highDragBreakRisk = clamp((dragToWeakRatio - 1) / 0.35);
-  const breakChance = clamp(0.18 * directBreakRisk + 0.72 * lockedBreakRisk + 0.32 * highDragBreakRisk);
-  const overloadRisk = clamp((stressRatio - 0.88) / 0.42);
-  const lockedDragRisk = items.reel ? clamp((dragToWeakRatio - 0.92) / 0.5) * clamp(fishLoad / Math.max(safety.weakTension, 0.1)) : 0;
-  const safetyPenalty = clamp(0.55 * overloadRisk + 0.2 * lockedDragRisk + 0.25 * lockedBreakRisk);
+  const directBreakRisk = releaseStressRatio > 1 ? 1 : 0;
+  const lockedBreakRisk = releaseBranch && rawStressRatio > 1 ? lockedLineRisk : 0;
+  const breakChance = clamp(directBreakRisk + (1 - directBreakRisk) * lockedBreakRisk);
+  const overloadRisk = clamp((stressRatio - 0.82) / 0.38);
+  const safetyPenalty = clamp(0.72 * breakChance + 0.28 * overloadRisk);
   const usableDrag = items.reel ? Math.min(Math.max(safety.dragTension, 0.05), safety.weakTension) : safety.weakTension;
   const strengthScore = clamp((safety.weakTension + 0.55 * usableDrag) / Math.max(0.3, fishLoad * 1.3), 0, 1.35);
   const staminaScore = clamp(0.34 + 0.32 * softcap(presentation.skills.endurance, 8) + 0.18 * softcap(presentation.skills.strength, 9) + 0.16 * presentation.ctrl);
@@ -1364,14 +1376,29 @@ function reelingOutcomeProfile(presentation, fishObj, poolEntry, env, actualWeig
 }
 
 function fishRawTensionEstimate(fishObj, initialWeight) {
-  const staminaNow = reelingFishStaminaMax(fishObj, initialWeight);
-  const staminaBeforeUpdate = reelingFishStaminaMax(
-    fishObj,
-    initialWeight,
-    PREVIOUS_REELING_FISH_STAMINA_WEIGHT_COEFFICIENT,
+  const mass = Math.max(Number(initialWeight) || 0, 0.003);
+  const strength = Math.max(0, Number(fishObj?.strength) || 0);
+  const agility = Math.max(0, Number(fishObj?.agility) || strength || 1);
+  const fight = Math.max(0.2, 0.55 * strength + 0.45 * agility);
+  const massScale = mass ** 0.55;
+  const weightPressure = 0.32 * massScale;
+  const averageStaminaPressure = 0.55 + 0.75 * 0.72;
+  const averageBurstRoll = 1.05;
+  const burstPressure = (0.24 + 0.18 * strength + 0.12 * fight) * massScale * averageStaminaPressure * averageBurstRoll;
+  return compressRawTension(Math.max(0.2, weightPressure + burstPressure), mass);
+}
+
+function compressRawTension(rawTension, mass) {
+  const dynamicCap = Math.max(
+    REELING_RAW_TENSION_SOFTCAP_KG,
+    REELING_RAW_TENSION_REFERENCE_LOW_TENSION_KG +
+      (REELING_RAW_TENSION_REFERENCE_HIGH_TENSION_KG - REELING_RAW_TENSION_REFERENCE_LOW_TENSION_KG) *
+        (Math.max(mass, 0) - REELING_RAW_TENSION_REFERENCE_LOW_WEIGHT_KG) /
+        Math.max(1, REELING_RAW_TENSION_REFERENCE_HIGH_WEIGHT_KG - REELING_RAW_TENSION_REFERENCE_LOW_WEIGHT_KG),
   );
-  const staminaWeightScale = clamp(staminaNow / Math.max(staminaBeforeUpdate, 5), 0.65, 1.05);
-  return Math.max(0.2, initialWeight * (0.72 + 0.24 * fishObj.strength + 0.12 * fishObj.endurance) * staminaWeightScale);
+  if (rawTension <= dynamicCap) return rawTension;
+  const overflow = rawTension - dynamicCap;
+  return dynamicCap + (REELING_RAW_TENSION_OVERFLOW_PIVOT_KG * overflow) / (overflow + REELING_RAW_TENSION_OVERFLOW_PIVOT_KG);
 }
 
 function lineLockedOverloadRisk(presentation, fishObj, weight, fishLoad, safety) {
@@ -1467,10 +1494,16 @@ function tackleSafetyProfile(items, controls) {
     .filter((row) => Number.isFinite(row.tension) && row.tension > 0)
     .reduce((weak, row) => (row.tension < weak.tension ? row : weak), { part: "unknown", tension: Infinity });
   const weakTension = Number.isFinite(weakPoint.tension) ? weakPoint.tension : 1;
-  const dragTension = items.reel ? items.reel.frictionMax * clamp(Number(controls.dragRatio), 0, 1) : 0;
+  const dragInput = clamp(Number(controls.dragRatio), 0, 1);
+  const dragRatio = items.reel && dragInput === 0
+    ? (items.reel.frictionMax > 0 ? clamp((0.8 * weakTension) / items.reel.frictionMax) : 1)
+    : dragInput;
+  const dragTension = items.reel ? items.reel.frictionMax * dragRatio : 0;
   return {
     weakPart: weakPoint.part,
     weakTension,
+    dragInput,
+    dragRatio,
     dragTension,
     dragToWeakRatio: dragTension / Math.max(weakTension, 0.1),
   };
@@ -1856,7 +1889,7 @@ function dragRatioCandidates(rodType, loadout, fallback) {
   const safeRatio = tackleSafetyProfile(items, { dragRatio: 0 }).weakTension / items.reel.frictionMax;
   const dynamic = [0.55, 0.72, 0.86, 0.98, 1.08]
     .map((scale) => roundNumber(clamp(safeRatio * scale, 0.05, 0.98), 3));
-  return uniqueNumbers([...dynamic, ...fallback]).sort((a, b) => a - b);
+  return uniqueNumbers([0, ...dynamic, ...fallback]).sort((a, b) => a - b);
 }
 
 function uniqueNumbers(values) {
@@ -2257,8 +2290,14 @@ function roulette(rows, getWeight) {
 }
 
 function rollCatch(fishObj, poolEntry) {
-  const weight = catchWeightFromSkew(fishObj, normalish() + catchSizeShift(poolEntry));
-  const rating = ratingFromRoll(Math.random());
+  const latent = normalish();
+  const weight = catchWeightFromSkew(
+    fishObj,
+    latent + catchSizeShift(poolEntry),
+    gaussianNoise(0.035),
+    gaussianNoise(0.05),
+  );
+  const rating = ratingFromRoll(normalCdf(latent));
   const multiplier = RATING_MULTIPLIERS[rating] ?? 1;
   return { weight, rating, value: fishObj.baseValue * weight * multiplier };
 }
@@ -2269,13 +2308,19 @@ function normalish() {
   return sum - 3;
 }
 
+function gaussianNoise(sigma) {
+  return normalish() * Math.SQRT2 * sigma;
+}
+
 function catchSizeShift(poolEntry) {
   return 1.8 * ((poolEntry?.sizeModifier ?? 1) - 1);
 }
 
-function catchWeightFromSkew(fishObj, skew) {
-  const percentile = clamp(0.5 + skew / 6);
-  return lerp(fishObj.weightMin, fishObj.weightMax, clamp(percentile * 0.9 + 0.05));
+function catchWeightFromSkew(fishObj, skew, sizeNoise = 0, densityNoise = 0) {
+  const sizeRatio = clamp(CATCH_SIZE_RATIO_BASE + CATCH_SIZE_RATIO_LATENT_SCALE * skew + sizeNoise, 0.03, 0.998);
+  const density = clamp(CATCH_DENSITY_BASE + CATCH_DENSITY_LATENT_SCALE * skew + densityNoise, 0.55, 1.35);
+  const weightRatio = clamp((sizeRatio ** FISH_WEIGHT_RATIO_SIZE_EXPONENT) * density, 0.02, 1);
+  return lerp(fishObj.weightMin, fishObj.weightMax, weightRatio);
 }
 
 function ratingFromRoll(u) {
@@ -2284,6 +2329,13 @@ function ratingFromRoll(u) {
   if (u > 0.9) return "rare";
   if (u > 0.38) return "standard";
   return "below";
+}
+
+function normalCdf(x) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = 0.3989423 * Math.exp(-x * x / 2);
+  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return x >= 0 ? 1 - p : p;
 }
 
 function lerp(a, b, t) {

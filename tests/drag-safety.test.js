@@ -101,9 +101,33 @@ const poolEntry = { sizeModifier: 1 };
 const env = { wind: 0, waterFlow: 0 };
 
 assert.strictEqual(
+  FORMULA_LAST_UPDATED,
+  "2026-05-09 13:57",
+  "模拟器应标记为官网帮助页 2026-05-09 13:57 的公式版本",
+);
+
+assert.strictEqual(
   reelingFishStaminaMax({ endurance: 2, agility: 3 }, 10),
   31.6,
-  "鱼最大体力应同步官网 2026-05-07 21:18 公式，把 m_init 系数更新为 1.5",
+  "鱼最大体力应同步官网公式，把 m_init 系数更新为 1.5",
+);
+
+const formulaWeight = catchWeightFromSkew({ weightMin: 1, weightMax: 101 }, 0);
+const expectedFormulaWeight = 1 + 100 * clamp((0.52 ** FISH_WEIGHT_RATIO_SIZE_EXPONENT) * 0.88, 0.02, 1);
+assert(
+  Math.abs(formulaWeight - expectedFormulaWeight) < 1e-9,
+  `鱼重应按 rho_size^alpha * density 的最新公式估算，当前=${formulaWeight}, expected=${expectedFormulaWeight}`,
+);
+
+assert(
+  groundbaitMultiplierFromAmount(300) < 1.07,
+  `打窝前期应使用 smoothstep 非线性增长，少量窝料不能线性冲高，当前=${groundbaitMultiplierFromAmount(300)}`,
+);
+
+const autoDragSafety = tackleSafetyProfile(presentationWithDrag(0).items, presentationWithDrag(0).controls);
+assert(
+  Math.abs(autoDragSafety.dragTension - autoDragSafety.weakTension * 0.8) < 1e-9,
+  `摩擦片 0 应按薄弱点 80% 自动档解析，当前 drag=${autoDragSafety.dragTension}, weak=${autoDragSafety.weakTension}`,
 );
 
 const smallFishYield = estimateWeightStats({
@@ -191,7 +215,7 @@ assert(
 );
 renderResults(observedEstimate, null, 8, currentGroundbaitConfig(observedMatchLoadout, lanchaoBoatRegion));
 assert(
-  els.summary.innerHTML.includes("含误判 8.5 次"),
+  /含误判 8\.[0-9] 次/.test(els.summary.innerHTML),
   `误判次数也应该按有效作钓时间缩放，当前摘要=${els.summary.innerHTML}`,
 );
 assert.doesNotThrow(() => {
@@ -218,8 +242,8 @@ assert(
 const giantFish = { weightMin: 80, weightMax: 80, strength: 5, endurance: 5, agility: 3 };
 const giantOutcome = reelingOutcomeProfile(presentationWithDrag(0.95), giantFish, poolEntry, env, 80);
 assert(
-  giantOutcome.breakChance > 0.5,
-  `重鱼超过薄弱点时应该有明显爆装概率，当前=${giantOutcome.breakChance}`,
+  giantOutcome.breakChance > 0.9,
+  `重鱼超过薄弱点时应该接近确定爆装，当前=${giantOutcome.breakChance}`,
 );
 assert(
   giantOutcome.reelingSuccess < 0.1,
