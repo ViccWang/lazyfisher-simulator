@@ -42,6 +42,7 @@ input,
 select,
 textarea {
   font: inherit;
+  min-width: 0;
 }
 
 button {
@@ -99,7 +100,7 @@ svg {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 420px;
+  grid-template-columns: minmax(0, 1fr) minmax(400px, 460px);
   gap: 18px;
   align-items: start;
 }
@@ -117,6 +118,7 @@ svg {
 }
 
 .panel {
+  min-width: 0;
   border: 1px solid rgba(216, 226, 231, 0.9);
   border-radius: var(--radius);
   background: var(--panel);
@@ -131,6 +133,11 @@ svg {
   justify-content: space-between;
   gap: 14px;
   margin-bottom: 16px;
+  min-width: 0;
+}
+
+.panel-head > div {
+  min-width: 0;
 }
 
 .panel-head.compact {
@@ -142,6 +149,7 @@ svg {
   font-size: 1.04rem;
   line-height: 1.25;
   font-weight: 760;
+  overflow-wrap: anywhere;
 }
 
 .panel p {
@@ -149,6 +157,7 @@ svg {
   color: var(--muted);
   line-height: 1.5;
   font-size: 0.9rem;
+  overflow-wrap: anywhere;
 }
 
 .primary-btn,
@@ -159,6 +168,7 @@ svg {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  flex: 0 0 auto;
   min-height: 38px;
   border: 1px solid transparent;
   border-radius: var(--radius);
@@ -235,6 +245,10 @@ textarea {
   outline: none;
 }
 
+select {
+  text-overflow: ellipsis;
+}
+
 select:focus,
 input:focus,
 textarea:focus {
@@ -261,6 +275,7 @@ output {
   padding: 8px 10px;
   color: var(--ink);
   background: rgba(245, 250, 252, 0.78);
+  overflow-wrap: anywhere;
 }
 
 .static-field select[hidden],
@@ -288,7 +303,7 @@ input[type="hidden"] {
 
 .recommendation {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
+  grid-template-columns: 40px minmax(0, 1fr) minmax(118px, max-content);
   gap: 12px;
   align-items: center;
   border: 1px solid var(--line);
@@ -329,6 +344,11 @@ input[type="hidden"] {
   font-weight: 760;
 }
 
+.rec-title > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .rec-title button {
   border: 0;
   border-radius: 6px;
@@ -346,13 +366,21 @@ input[type="hidden"] {
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.35;
+  min-width: 0;
+}
+
+.rec-meta span,
+.rec-items span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .rec-score {
   display: grid;
   gap: 3px;
   text-align: right;
-  white-space: nowrap;
+  min-width: 0;
+  white-space: normal;
 }
 
 .rec-score strong {
@@ -369,6 +397,10 @@ input[type="hidden"] {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
   gap: 18px;
+}
+
+#manualFields.form-grid.dense {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .loadout-tabs {
@@ -406,9 +438,9 @@ input[type="hidden"] {
 
 .transfer-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
-  align-items: end;
+  align-items: start;
 }
 
 .json-label {
@@ -426,7 +458,7 @@ input[type="hidden"] {
 .transfer-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   flex-wrap: wrap;
   gap: 8px;
 }
@@ -446,13 +478,14 @@ input[type="hidden"] {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   margin-bottom: 14px;
 }
 
 .summary-card {
   min-height: 86px;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #fff;
@@ -464,6 +497,7 @@ input[type="hidden"] {
   color: var(--muted);
   font-size: 0.76rem;
   margin-bottom: 6px;
+  overflow-wrap: anywhere;
 }
 
 .summary-value {
@@ -471,6 +505,7 @@ input[type="hidden"] {
   font-size: 1.42rem;
   line-height: 1.1;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .summary-note {
@@ -479,6 +514,7 @@ input[type="hidden"] {
   color: var(--muted);
   font-size: 0.76rem;
   line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .distribution {
@@ -488,20 +524,23 @@ input[type="hidden"] {
 
 .bar-row {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr) minmax(74px, auto);
+  grid-template-columns: minmax(96px, 1fr) minmax(74px, auto);
+  grid-template-areas:
+    "label value"
+    "track track";
   align-items: center;
   gap: 8px;
   font-size: 0.82rem;
 }
 
 .bar-label {
+  grid-area: label;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .bar-track {
+  grid-area: track;
   height: 10px;
   overflow: hidden;
   border-radius: 999px;
@@ -515,6 +554,7 @@ input[type="hidden"] {
 }
 
 .bar-value {
+  grid-area: value;
   display: grid;
   justify-items: end;
   gap: 2px;
@@ -527,13 +567,13 @@ input[type="hidden"] {
 }
 
 .bar-value small {
-  max-width: 116px;
-  overflow: hidden;
+  max-width: 100%;
+  overflow: visible;
   color: var(--muted);
   font-size: 0.68rem;
   line-height: 1.15;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .map-revenue {
@@ -565,7 +605,7 @@ input[type="hidden"] {
 
 .map-revenue-row {
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) minmax(92px, auto);
+  grid-template-columns: 26px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   padding: 10px;
@@ -596,18 +636,25 @@ input[type="hidden"] {
 
 .map-revenue-main strong,
 .map-revenue-main small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .map-revenue-value {
-  text-align: right;
+  grid-column: 2;
+  text-align: left;
 }
 
 .map-revenue-value strong {
   color: var(--blue-dark);
   font-size: 0.98rem;
+  overflow-wrap: anywhere;
+}
+
+.map-revenue-value small {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .formula-panel ul {
@@ -660,9 +707,11 @@ input[type="hidden"] {
   }
 
   .rec-score {
+    display: flex;
+    flex-wrap: wrap;
     grid-column: 1 / -1;
-    grid-template-columns: repeat(3, auto);
     justify-content: start;
+    align-items: baseline;
     text-align: left;
     gap: 10px;
   }
@@ -678,12 +727,11 @@ input[type="hidden"] {
     align-items: stretch;
   }
 
-  .loadout-tabs,
-  .summary-grid {
+  .loadout-tabs {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .bar-row {
-    grid-template-columns: 72px minmax(0, 1fr) minmax(64px, auto);
+    grid-template-columns: minmax(72px, 1fr) minmax(64px, auto);
   }
 }

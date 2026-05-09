@@ -14,6 +14,10 @@ const defaults = {
   groundbaitModeSelect: "none",
   groundbaitTypeSelect: "",
   groundbaitAmountInput: "3000",
+  strengthSkillInput: "28",
+  enduranceSkillInput: "26",
+  experienceSkillInput: "23",
+  techniqueSkillInput: "25",
   castInput: "0",
   floatInput: "0",
   dragInput: "0.5",
@@ -140,6 +144,33 @@ assert.strictEqual(
   4,
   "赤湾深槽船钓应同步 2026-05-09 21:02 的地图 notice 倍率",
 );
+assert.strictEqual(
+  byId(DATA.reels, "spoolworks_sw1500m_match").castFactor,
+  1.03,
+  "渔轮应保留官方 cast_factor，用于抛投与推荐评分",
+);
+assert.strictEqual(
+  byId(DATA.reels, "spoolworks_sw1500m_match").controlFactor,
+  1.01,
+  "渔轮应保留官方 control_factor，用于控鱼能力",
+);
+assert.strictEqual(
+  byId(DATA.reels, "spoolworks_sw1500m_match").economyFactor,
+  1.02,
+  "渔轮应保留官方 economy_factor，用于遛鱼体力压力",
+);
+elements.get("strengthSkillInput").value = "91";
+elements.get("enduranceSkillInput").value = "87";
+elements.get("experienceSkillInput").value = "83";
+elements.get("techniqueSkillInput").value = "79";
+assert.deepStrictEqual(
+  derivedSkills(36),
+  { strength: 91, endurance: 87, experience: 83, skill: 79 },
+  "模拟器应读取玩家四项技能等级，而不是只按账号等级粗略派生",
+);
+for (const id of ["strengthSkillInput", "enduranceSkillInput", "experienceSkillInput", "techniqueSkillInput"]) {
+  elements.get(id).value = "";
+}
 assert(
   heavyFishRetrieveResistanceFactor(80, false) < 1,
   `60kg 以上大鱼应按新版公式降低有效回线效率，当前=${heavyFishRetrieveResistanceFactor(80, false)}`,
@@ -230,7 +261,7 @@ assert(
 );
 renderResults(observedEstimate, null, 8, currentGroundbaitConfig(observedMatchLoadout, lanchaoBoatRegion));
 assert(
-  /含误判 8\.[0-9] 次/.test(els.summary.innerHTML),
+  /含误判 [89]\.[0-9] 次/.test(els.summary.innerHTML),
   `误判次数也应该按有效作钓时间缩放，当前摘要=${els.summary.innerHTML}`,
 );
 assert.doesNotThrow(() => {
@@ -265,6 +296,36 @@ assert(
   `重鱼爆装风险应压低实际起鱼率，当前=${giantOutcome.reelingSuccess}`,
 );
 
+const lineCutOff = presentationWithDrag(0.45);
+lineCutOff.actualCast = 45;
+lineCutOff.targetDepth = 10;
+lineCutOff.controls.lineCutLineOutLimitM = 12;
+lineCutOff.controls.lineCutOut = 12;
+const lineCutOutcome = reelingOutcomeProfile(lineCutOff, { weightMin: 12, weightMax: 12, strength: 2, endurance: 2, agility: 2 }, poolEntry, env, 12);
+assert.strictEqual(
+  lineCutOutcome.lineCutChance,
+  1,
+  `自动切线出线阈值应按初始出线触发主动切线，当前=${lineCutOutcome.lineCutChance}`,
+);
+assert.strictEqual(
+  lineCutOutcome.reelingSuccess,
+  0,
+  `主动切线后不应再计入起鱼成功率，当前=${lineCutOutcome.reelingSuccess}`,
+);
+
+const efficientReelPresentation = presentationWithDrag(0.45);
+efficientReelPresentation.items.reel = { frictionMax: 4, durability: 100, controlFactor: 1.12, economyFactor: 1.1 };
+efficientReelPresentation.reelPower = 0.65;
+const baselineReelPresentation = presentationWithDrag(0.45);
+baselineReelPresentation.items.reel = { frictionMax: 4, durability: 100, controlFactor: 1, economyFactor: 1 };
+baselineReelPresentation.reelPower = 0.65;
+const efficientReelOutcome = reelingOutcomeProfile(efficientReelPresentation, fish, poolEntry, env, 6);
+const baselineReelOutcome = reelingOutcomeProfile(baselineReelPresentation, fish, poolEntry, env, 6);
+assert(
+  efficientReelOutcome.reelingSuccess > baselineReelOutcome.reelingSuccess,
+  `更高 control/economy_factor 的渔轮应提高遛鱼期望，baseline=${baselineReelOutcome.reelingSuccess}, efficient=${efficientReelOutcome.reelingSuccess}`,
+);
+
 const weakLineBottomLoadout = {
   rod: "tideforge_bf660_oceanlord_bottom",
   reel: "harborforge_drum_9000",
@@ -278,6 +339,51 @@ const weakLineDrags = Array.from(new Set(controlVariants("bottom_rod", getRegion
 assert(
   weakLineDrags.some((dragRatio) => dragRatio > 0 && dragRatio < 0.2),
   `自动调参候选应该按当前装备薄弱点插入低摩擦片安全档，当前候选=${weakLineDrags.join(",")}`,
+);
+
+const blackreefBigBottomLoadout = {
+  rod: "tideforge_bf720_leviathan_bottom",
+  reel: "abyssalcrown_ac18000_ocean",
+  line: "braidcore_pe_120lb",
+  leader: "braidcore_bc95_shock",
+  hook: "marineredge_bg33_pelagic_8_0",
+  bait: "small_fish_big_whole_310",
+  sinker: "deepanchor_da120",
+  tip: "quiverflex_qf68b",
+};
+const blackreefRoundLimits = Array.from(new Set(controlVariants("bottom_rod", byId(DATA.regions, "blackreef_dropoff"), blackreefBigBottomLoadout).map((controls) => controls.lineCutRoundLimit)));
+assert(
+  blackreefRoundLimits.includes(200),
+  `大物图自动调参应搜索 200 回合止损，避免把长搏鱼错误切线，当前候选=${blackreefRoundLimits.join(",")}`,
+);
+const blackreefRegion = byId(DATA.regions, "blackreef_dropoff");
+const blackreefRound100 = estimateLoadout(
+  blackreefBigBottomLoadout,
+  defaultControls({ throwDistance: 34.6, dragRatio: 0.95, reelSpeed: 1.2, lineCutRoundLimit: 100 }),
+  blackreefRegion,
+  getWeather(blackreefRegion),
+  45,
+  2,
+  1.2,
+  { mode: "none", amount: 0, type: "" },
+);
+const blackreefRound200 = estimateLoadout(
+  blackreefBigBottomLoadout,
+  defaultControls({ throwDistance: 34.6, dragRatio: 0.95, reelSpeed: 1.2, lineCutRoundLimit: 200 }),
+  blackreefRegion,
+  getWeather(blackreefRegion),
+  45,
+  2,
+  1.2,
+  { mode: "none", amount: 0, type: "" },
+);
+assert(
+  blackreefRound200.lineCutEvents < blackreefRound100.lineCutEvents,
+  `黑礁大底钓套 200 回合止损应显著减少主动切线，100=${blackreefRound100.lineCutEvents}, 200=${blackreefRound200.lineCutEvents}`,
+);
+assert(
+  estimateWeightStats(blackreefRound200, 2).kgPerHour > estimateWeightStats(blackreefRound100, 2).kgPerHour,
+  `减少主动切线后应提升黑礁大底钓套重量收益，100=${estimateWeightStats(blackreefRound100, 2).kgPerHour}, 200=${estimateWeightStats(blackreefRound200, 2).kgPerHour}`,
 );
 
 const tunedWeakLine = bestControlsForLoadout(
