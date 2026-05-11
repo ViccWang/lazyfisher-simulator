@@ -106,8 +106,23 @@ const env = { wind: 0, waterFlow: 0 };
 
 assert.strictEqual(
   FORMULA_LAST_UPDATED,
-  "2026-05-09 21:02",
-  "模拟器应标记为官网帮助页 2026-05-09 21:02 的公式版本",
+  "2026-05-11 12:19",
+  "模拟器应标记为官网帮助页 2026-05-11 12:19 的公式版本",
+);
+
+assert.strictEqual(
+  DATA.meta.version,
+  "1778315607",
+  "模拟器应载入官网 get_game_data 的最新静态数据版本",
+);
+assert.strictEqual(
+  window.LAZYFISHER_GAME_DATA.ship_modules.length,
+  18,
+  "模拟器应同步官网最新船模块数据",
+);
+assert(
+  window.LAZYFISHER_GAME_DATA.ship_modules.some((item) => item.id === "bluewater_fighting_gantry"),
+  "模拟器应包含 2026-05-11 新增的蓝水搏鱼龙门架船模块",
 );
 
 assert.strictEqual(
@@ -137,12 +152,22 @@ assert(
 assert.strictEqual(
   byId(DATA.regions, "boat_yinlin_offshore").noticeMultiplier,
   1.7,
-  "银鳞岛外海船钓应同步 2026-05-09 21:02 的地图 notice 倍率",
+  "银鳞岛外海船钓应同步地图 notice 倍率",
+);
+assert.strictEqual(
+  byId(DATA.regions, "boat_yinlin_offshore").sceneMultiplier,
+  2.65,
+  "银鳞岛外海船钓应读取 boat_trip.encounter_multiplier 作为场景遭遇倍率",
+);
+assert.strictEqual(
+  byId(DATA.regions, "boat_yinlin_offshore").weightMaxOverride,
+  120,
+  "银鳞岛外海船钓应读取 boat_trip.weight_max_kg_override 作为公共船钓个体上限",
 );
 assert.strictEqual(
   byId(DATA.regions, "boat_crimson_trench").noticeMultiplier,
   4,
-  "赤湾深槽船钓应同步 2026-05-09 21:02 的地图 notice 倍率",
+  "赤湾深槽船钓应同步地图 notice 倍率",
 );
 assert.strictEqual(
   byId(DATA.reels, "spoolworks_sw1500m_match").castFactor,
@@ -158,6 +183,44 @@ assert.strictEqual(
   byId(DATA.reels, "spoolworks_sw1500m_match").economyFactor,
   1.02,
   "渔轮应保留官方 economy_factor，用于遛鱼体力压力",
+);
+
+const yinlin = byId(DATA.regions, "boat_yinlin_offshore");
+const alphaTuna = byId(DATA.fish, "yellowfin_tuna_alpha");
+assert(
+  catchWeightFromSkew(alphaTuna, 3, 0, 0, yinlin) <= 120,
+  "公共船钓生成鱼重应应用 boat_trip.weight_max_kg_override 上限",
+);
+
+const lowDensityYinlin = {
+  ...yinlin,
+  fishPool: yinlin.fishPool.map((entry) => ({ ...entry, population: entry.population * 0.01 })),
+};
+const noSceneYinlin = { ...lowDensityYinlin, sceneMultiplier: 1 };
+const bottomLoadout = {
+  rod: "tideforge_bf750_abyssal_bottom",
+  reel: "abyssalcrown_ac22000_trench",
+  line: "braidcore_pe_300lb_abyss",
+  leader: "steelguard_sg180_trace",
+  hook: "marineredge_bg37_trench_8_0",
+  bait: "oceanscent_skipjack_chunk",
+  sinker: "deepanchor_da220",
+  tip: "quiverflex_qf78a",
+};
+const bottomControls = defaultControls({
+  throwDistance: 61.6,
+  dragRatio: 0,
+  reelSpeed: 1,
+  lineCutRoundLimit: 200,
+});
+const yinlinEnv = { ...yinlin.environment, timeAveraged: true, fishActivityFactor: 1, visibilityFactor: 1 };
+const boostedPresentation = buildPresentation(bottomLoadout, bottomControls, lowDensityYinlin, yinlinEnv, 53);
+const baselinePresentation = buildPresentation(bottomLoadout, bottomControls, noSceneYinlin, yinlinEnv, 53);
+const boostedEncounter = candidateWeights(boostedPresentation, lowDensityYinlin, yinlinEnv, 53).encounterRate;
+const baselineEncounter = candidateWeights(baselinePresentation, noSceneYinlin, yinlinEnv, 53).encounterRate;
+assert(
+  Math.abs(boostedEncounter / baselineEncounter - 2.65) < 1e-9,
+  `船钓场景倍率应线性进入总遭遇率，当前倍率=${boostedEncounter / baselineEncounter}`,
 );
 elements.get("strengthSkillInput").value = "91";
 elements.get("enduranceSkillInput").value = "87";
@@ -260,8 +323,9 @@ assert(
   `蓝潮岬重鱼图的兜底鱼价不能把 1000kg 出头估到接近 20w 金，当前=${observedSaleValue}`,
 );
 renderResults(observedEstimate, null, 8, currentGroundbaitConfig(observedMatchLoadout, lanchaoBoatRegion));
+const falseSignalMatch = els.summary.innerHTML.match(/含误判 ([0-9.]+) 次/);
 assert(
-  /含误判 [89]\.[0-9] 次/.test(els.summary.innerHTML),
+  falseSignalMatch && Number(falseSignalMatch[1]) > 0 && Number(falseSignalMatch[1]) < 15,
   `误判次数也应该按有效作钓时间缩放，当前摘要=${els.summary.innerHTML}`,
 );
 assert.doesNotThrow(() => {
@@ -276,6 +340,65 @@ assert.doesNotThrow(() => {
   );
   assert(randomSimulation?.stats, "随机模拟应该返回统计结果");
 }, "点击开始模拟对应的随机模拟不应该抛错");
+
+const seamountRegion = byId(DATA.regions, "seamount_edge");
+const seamountGroundbait = { enabled: true, mode: "auto", baitType: "", amount: 3000 };
+const weakMatchLoadout = {
+  rod: "aqualis_mr570_celestial_match",
+  reel: "abyssalcrown_ac22000_trench",
+  line: "braidcore_pe_300lb_abyss",
+  leader: "steelguard_sg180_trace",
+  hook: "marineredge_bg37_trench_8_0",
+  bait: "oceanscent_skipjack_chunk",
+  float: "imperialfloat_if24_crown",
+};
+const heavyBottomLoadout = {
+  rod: "tideforge_bf750_abyssal_bottom",
+  reel: "abyssalcrown_ac22000_trench",
+  line: "braidcore_pe_300lb_abyss",
+  leader: "steelguard_sg180_trace",
+  hook: "marineredge_bg37_trench_8_0",
+  bait: "oceanscent_skipjack_chunk",
+  sinker: "deepanchor_da220",
+  tip: "quiverflex_qf78a",
+};
+const weakMatchControls = defaultControls({
+  throwDistance: 21,
+  floatLengthCm: 1800,
+  dragRatio: 0,
+  reelSpeed: 1,
+  lineCutRoundLimit: 200,
+});
+const heavyBottomControls = defaultControls({
+  throwDistance: 61.6,
+  dragRatio: 0,
+  reelSpeed: 1,
+  lineCutRoundLimit: 200,
+});
+const weakMatchEstimate = estimateLoadout(
+  weakMatchLoadout,
+  weakMatchControls,
+  seamountRegion,
+  getWeather(seamountRegion),
+  53,
+  8,
+  1.2,
+  seamountGroundbait,
+);
+const heavyBottomEstimate = estimateLoadout(
+  heavyBottomLoadout,
+  heavyBottomControls,
+  seamountRegion,
+  getWeather(seamountRegion),
+  53,
+  8,
+  1.2,
+  seamountGroundbait,
+);
+assert(
+  weakMatchEstimate.equipmentBreaks < 0.1 && (weakMatchEstimate.lineLockRisk ?? 0) < 0.01,
+  `摩擦片能正常放线且余线足够时，不应仅因原始鱼压超过竿体上限就判定爆装，break=${weakMatchEstimate.equipmentBreaks}, lock=${weakMatchEstimate.lineLockRisk}`,
+);
 
 const safeDrag = reelingSuccessRate(presentationWithDrag(0.45), fish, poolEntry, env);
 const overDrag = reelingSuccessRate(presentationWithDrag(0.95), fish, poolEntry, env);
@@ -294,6 +417,35 @@ assert(
 assert(
   giantOutcome.reelingSuccess < 0.1,
   `重鱼爆装风险应压低实际起鱼率，当前=${giantOutcome.reelingSuccess}`,
+);
+
+const releaseRoomPresentation = presentationWithDrag(0.45);
+releaseRoomPresentation.items.line.length = 200;
+const releaseRoomOutcome = reelingOutcomeProfile(
+  releaseRoomPresentation,
+  { weightMin: 20, weightMax: 20, strength: 4, endurance: 3, agility: 3 },
+  poolEntry,
+  env,
+  20,
+);
+assert.strictEqual(
+  releaseRoomOutcome.breakChance,
+  0,
+  `原始鱼压超过薄弱点但摩擦片能放线且余线足够时不应爆装，当前=${releaseRoomOutcome.breakChance}`,
+);
+
+const lockedLinePresentation = presentationWithDrag(0.45);
+lockedLinePresentation.items.line.length = 80;
+const lockedLineOutcome = reelingOutcomeProfile(
+  lockedLinePresentation,
+  { weightMin: 20, weightMax: 20, strength: 4, endurance: 3, agility: 3 },
+  poolEntry,
+  env,
+  20,
+);
+assert(
+  lockedLineOutcome.breakChance > 0.5,
+  `余线不足导致轮组锁死后才应出现爆装风险，当前=${lockedLineOutcome.breakChance}`,
 );
 
 const lineCutOff = presentationWithDrag(0.45);
