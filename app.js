@@ -54,7 +54,17 @@ const REELING_HEAVY_NORMAL_RETRIEVE_PRESSURE = 0.34;
 const REELING_HEAVY_SPRINT_RETRIEVE_PRESSURE = 0.64;
 const REELING_HIGH_REEL_PRESSURE_SPEED_START_MPS = 1.5;
 const REELING_HIGH_REEL_PRESSURE_SPEED_FULL_MPS = 3.5;
-const REELING_HIGH_REEL_TENSION_MULTIPLIER = 0.32;
+const REELING_HIGH_REEL_TENSION_PRESSURE_START_WEIGHT_KG = 35;
+const REELING_HIGH_REEL_TENSION_PRESSURE_FULL_WEIGHT_KG = 180;
+const REELING_HIGH_REEL_TENSION_PRESSURE_STAMINA_FLOOR_RATIO = 0.25;
+const REELING_HIGH_REEL_TENSION_PRESSURE_RELIEF_START_LINE_OUT_M = 8;
+const REELING_HIGH_REEL_TENSION_PRESSURE_RELIEF_FULL_LINE_OUT_M = 70;
+const REELING_HIGH_REEL_TENSION_PRESSURE_MAX_KG = 8;
+const REELING_AUTO_SPEED_BASE = 1.25;
+const REELING_AUTO_SPEED_STRENGTH_SCALE = 2.8;
+const REELING_AUTO_SPEED_SKILL_SCALE = 1.2;
+const REELING_AUTO_SPEED_STAMINA_SCALE = 0.75;
+const REELING_AUTO_SPEED_AVERAGE_STAMINA_RATIO = 0.5;
 const BITE_WINDOW_BASE_SECONDS = 4;
 const BITE_WINDOW_REACTION_TICK_SECONDS = 1.7;
 const REELING_PHASE_TICK_SECONDS = 3;
@@ -1398,8 +1408,7 @@ function canUseCentralReelingOutcome(presentation, fishObj, poolEntry, central) 
 function reelingOutcomeProfile(presentation, fishObj, poolEntry, env, actualWeight = null) {
   const items = presentation.items;
   const initialWeight = Number.isFinite(actualWeight) && actualWeight > 0 ? actualWeight : fishInitialMassEstimate(fishObj, poolEntry, presentation.region);
-  const pressure = highReelPressure(presentation);
-  const fishLoad = fishRawTensionEstimate(fishObj, initialWeight) * (1 + REELING_HIGH_REEL_TENSION_MULTIPLIER * pressure);
+  const fishLoad = fishRawTensionEstimate(fishObj, initialWeight) + fastReelExtraTension(presentation, initialWeight);
   const safety = tackleSafetyProfile(items, presentation.controls);
   const lineCutReason = autoLineCutReason(presentation, fishObj, poolEntry, initialWeight);
   if (lineCutReason) {
@@ -1435,7 +1444,7 @@ function reelingOutcomeProfile(presentation, fishObj, poolEntry, env, actualWeig
   const overloadRisk = clamp((stressRatio - 0.82) / 0.38);
   const safetyPenalty = clamp(0.72 * breakChance + 0.28 * overloadRisk);
   const usableDrag = items.reel ? Math.min(Math.max(safety.dragTension, 0.05), safety.weakTension) : safety.weakTension;
-  const heavyRetrieveFactor = heavyFishRetrieveResistanceFactor(initialWeight, pressure > 0.45);
+  const heavyRetrieveFactor = heavyFishRetrieveResistanceFactor(initialWeight, false);
   const reelControlFactor = items.reel ? clamp(items.reel.controlFactor ?? presentation.reelControlFactor ?? 1, 0.75, 1.25) : 1;
   const reelEconomyFactor = items.reel ? clamp(items.reel.economyFactor ?? presentation.reelEconomyFactor ?? 1, 0.75, 1.25) : 1;
   const strengthScore = clamp((safety.weakTension + 0.55 * usableDrag) / Math.max(0.3, fishLoad * 1.3), 0, 1.35) * heavyRetrieveFactor * reelControlFactor;
@@ -1517,18 +1526,59 @@ function lineLockedOverloadRisk(presentation, fishObj, weight, fishLoad, safety)
   return clamp((runDemand - freeLine) / Math.max(runDemand, 1));
 }
 
-function highReelPressure(presentation) {
-  const speed = actualReelSpeed(presentation);
+function highReelPressure(presentation, staminaRatio = REELING_AUTO_SPEED_AVERAGE_STAMINA_RATIO) {
+  const speed = actualReelSpeed(presentation, staminaRatio);
   return clamp(
     (speed - REELING_HIGH_REEL_PRESSURE_SPEED_START_MPS) /
       Math.max(0.1, REELING_HIGH_REEL_PRESSURE_SPEED_FULL_MPS - REELING_HIGH_REEL_PRESSURE_SPEED_START_MPS),
   );
 }
 
-function actualReelSpeed(presentation) {
+function fastReelExtraTension(presentation, weight, staminaRatio = REELING_AUTO_SPEED_AVERAGE_STAMINA_RATIO) {
+  if (!presentation?.items?.reel) return 0;
+  const speedPressure = highReelPressure(presentation, staminaRatio);
+  if (speedPressure <= 0) return 0;
+  const weightPressure = clamp(
+    (Math.max(0, Number(weight) || 0) - REELING_HIGH_REEL_TENSION_PRESSURE_START_WEIGHT_KG) /
+      Math.max(1, REELING_HIGH_REEL_TENSION_PRESSURE_FULL_WEIGHT_KG - REELING_HIGH_REEL_TENSION_PRESSURE_START_WEIGHT_KG),
+  );
+  if (weightPressure <= 0) return 0;
+  const staminaPressure = REELING_HIGH_REEL_TENSION_PRESSURE_STAMINA_FLOOR_RATIO +
+    (1 - REELING_HIGH_REEL_TENSION_PRESSURE_STAMINA_FLOOR_RATIO) * clamp(staminaRatio) ** 2;
+  const lineOut = initialLineOutMeters(presentation);
+  const linePressure = 1 - clamp(
+    (lineOut - REELING_HIGH_REEL_TENSION_PRESSURE_RELIEF_START_LINE_OUT_M) /
+      Math.max(1, REELING_HIGH_REEL_TENSION_PRESSURE_RELIEF_FULL_LINE_OUT_M - REELING_HIGH_REEL_TENSION_PRESSURE_RELIEF_START_LINE_OUT_M),
+  );
+  return REELING_HIGH_REEL_TENSION_PRESSURE_MAX_KG * speedPressure * weightPressure * staminaPressure * linePressure;
+}
+
+function autoReelSpeedScore(skills = {}, staminaRatio = REELING_AUTO_SPEED_AVERAGE_STAMINA_RATIO) {
+  return REELING_AUTO_SPEED_BASE +
+    REELING_AUTO_SPEED_STRENGTH_SCALE * clamp((skills.strength ?? 0) / 120, 0, 0.25) +
+    REELING_AUTO_SPEED_SKILL_SCALE * clamp((skills.skill ?? 0) / 100, 0, 0.35) +
+    REELING_AUTO_SPEED_STAMINA_SCALE * (1 - clamp(staminaRatio));
+}
+
+function maxAutoReelSpeedScore() {
+  return REELING_AUTO_SPEED_BASE +
+    REELING_AUTO_SPEED_STRENGTH_SCALE * 0.25 +
+    REELING_AUTO_SPEED_SKILL_SCALE * 0.35 +
+    REELING_AUTO_SPEED_STAMINA_SCALE;
+}
+
+function autoReelSpeedFromItems(items, skills, staminaRatio = REELING_AUTO_SPEED_AVERAGE_STAMINA_RATIO) {
+  const maxSpeed = Number(items?.reel?.speedMax);
+  if (!Number.isFinite(maxSpeed) || maxSpeed <= 0) return 0;
+  return maxSpeed * clamp(autoReelSpeedScore(skills, staminaRatio) / maxAutoReelSpeedScore(), 0, 1);
+}
+
+function actualReelSpeed(presentation, staminaRatio = REELING_AUTO_SPEED_AVERAGE_STAMINA_RATIO) {
   const configured = Math.max(0, Number(presentation?.controls?.reelSpeed) || 0);
   const maxSpeed = Number(presentation?.items?.reel?.speedMax);
-  return Number.isFinite(maxSpeed) && maxSpeed > 0 ? Math.min(configured, maxSpeed) : configured;
+  if (!Number.isFinite(maxSpeed) || maxSpeed <= 0) return configured;
+  if (configured > 0) return Math.min(configured, maxSpeed);
+  return autoReelSpeedFromItems(presentation?.items, presentation?.skills, staminaRatio);
 }
 
 function heavyFishRetrieveResistanceFactor(weight, sprinting = false) {
@@ -1574,8 +1624,7 @@ function estimatedReelingSeconds(presentation, fishObj, poolEntry, evals = null)
 function estimatedReelingSecondsForWeight(presentation, fishObj, poolEntry, initialWeight, evals = null) {
   const lineOut = initialLineOutMeters(presentation);
   const reelSpeed = Math.max(0.15, actualReelSpeed(presentation) || 0.8);
-  const pressure = highReelPressure(presentation);
-  const heavyRetrieveFactor = heavyFishRetrieveResistanceFactor(initialWeight, pressure > 0.45);
+  const heavyRetrieveFactor = heavyFishRetrieveResistanceFactor(initialWeight, false);
   const reelControlFactor = presentation?.items?.reel ? clamp(presentation.items.reel.controlFactor ?? presentation.reelControlFactor ?? 1, 0.75, 1.25) : 1;
   const reelEconomyFactor = presentation?.items?.reel ? clamp(presentation.items.reel.economyFactor ?? presentation.reelEconomyFactor ?? 1, 0.75, 1.25) : 1;
   const retrieve = reelSpeed *
@@ -1709,7 +1758,7 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     const pEscape = pHook * evals.escapeChance;
     const weakTension = Math.max(evals.reelingRisk.weakTension ?? presentation.tackleSafety.weakTension, 0.1);
     const tailWeight = catchWeightFromSkew(row.fish, catchSizeShift(row.entry) + 2.4, 0, 0, region);
-    const tailRawTension = fishRawTensionEstimate(row.fish, tailWeight) * (1 + REELING_HIGH_REEL_TENSION_MULTIPLIER * highReelPressure(presentation));
+    const tailRawTension = fishRawTensionEstimate(row.fish, tailWeight) + fastReelExtraTension(presentation, tailWeight);
     const lockSafety = {
       ...presentation.tackleSafety,
       weakTension,
@@ -1890,7 +1939,7 @@ function recommendationSlotCandidates(slot, rodType, level) {
 
 function bestControlsForLoadout(loadout, rodType, region, env, level, hours, groundbaitConfig = currentGroundbaitConfig(loadout, region)) {
   let best = null;
-  for (const controls of controlVariants(rodType, region, loadout)) {
+  for (const controls of controlVariants(rodType, region, loadout, level)) {
     const trial = scoreRecommendation(loadout, controls, region, env, level, hours, groundbaitConfig);
     if (trial && (!best || trial.score > best.score)) best = trial;
   }
@@ -2005,7 +2054,7 @@ function bestLure(level, fishes, rodItem) {
     .sort((a, b) => ((lureCounts.get(b.lureType) || 0) + lureWeightMatch(rodItem, b) + b.turbulence * 0.4 + b.reflectivity * 0.25) - ((lureCounts.get(a.lureType) || 0) + lureWeightMatch(rodItem, a) + a.turbulence * 0.4 + a.reflectivity * 0.25))[0]?.id || "";
 }
 
-function controlVariants(rodType, region, loadout) {
+function controlVariants(rodType, region, loadout, level = currentLevel()) {
   const base = defaultControls();
   const castOffset = activeCastOffset(region);
   if (rodType === "hand_rod" || rodType === "match_rod") {
@@ -2020,7 +2069,7 @@ function controlVariants(rodType, region, loadout) {
     ].map((depth) => Math.round(clamp(depth, 35, 3000) / 10) * 10));
     const casts = uniqueNumbers([0, castOffset + 5, castOffset + 8, region.depthMin + 7].map((distance) => roundNumber(Math.max(0, distance), 1)));
     const drags = dragRatioCandidates(rodType, loadout, [0.42, 0.5, 0.7, 0.85, 0.95]);
-    const speeds = reelSpeedCandidates(rodType, loadout, [1.25]);
+    const speeds = reelSpeedCandidates(rodType, loadout, [1.25], level);
     const variants = depths.flatMap((floatLengthCm) => casts.flatMap((throwDistance) => speeds.flatMap((reelSpeed) => drags.map((dragRatio) => ({
       ...base,
       throwDistance,
@@ -2033,7 +2082,7 @@ function controlVariants(rodType, region, loadout) {
   if (rodType === "bottom_rod") {
     const casts = uniqueNumbers([0, 0.9 * region.depthMax + 4, 1.35 * region.depthMax + 4, 1.8 * region.depthMax + 4].map((distance) => roundNumber(Math.max(0, distance), 1)));
     const drags = dragRatioCandidates(rodType, loadout, [0.42, 0.55, 0.7, 0.85, 0.95]);
-    const speeds = reelSpeedCandidates(rodType, loadout, [0.6, 0.8, 1, 1.2]);
+    const speeds = reelSpeedCandidates(rodType, loadout, [0.6, 0.8, 1, 1.2], level);
     const variants = casts.flatMap((throwDistance) => drags.flatMap((dragRatio) => speeds.map((reelSpeed) => ({
       ...base,
       throwDistance,
@@ -2045,7 +2094,7 @@ function controlVariants(rodType, region, loadout) {
   const lureItem = byId(DATA.lures, loadout.lure);
   const actions = ["auto", "steady_surface", "steady_mid", "bottom_hop", "mid_twitch"];
   const casts = uniqueNumbers([0, castOffset + 3, castOffset + 8, 1.2 * region.depthMax + 4].map((distance) => roundNumber(Math.max(0, distance), 1)));
-  const speeds = reelSpeedCandidates(rodType, loadout, [lureItem?.lureType === "jig" ? 0.85 : 1.35, 0.85, 1.35, 1.45]);
+  const speeds = reelSpeedCandidates(rodType, loadout, [lureItem?.lureType === "jig" ? 0.85 : 1.35, 0.85, 1.35, 1.45], level);
   const drags = dragRatioCandidates(rodType, loadout, [0.45, 0.7, 0.85, 0.95]);
   const variants = casts.flatMap((throwDistance) => actions.flatMap((lureAction) => speeds.flatMap((reelSpeed) => drags.map((dragRatio) => ({
     ...base,
@@ -2057,16 +2106,21 @@ function controlVariants(rodType, region, loadout) {
   return expandLineCutRoundVariants(variants, rodType);
 }
 
-function reelSpeedCandidates(rodType, loadout, fallback) {
+function reelSpeedCandidates(rodType, loadout, fallback, level = currentLevel()) {
   if (rodType === "hand_rod") return [0];
   const items = getLoadoutItems(loadout);
   const maxSpeed = Number(items.reel?.speedMax);
   const base = uniqueNumbers(fallback).filter((speed) => speed > 0);
   if (!Number.isFinite(maxSpeed) || maxSpeed <= 0) return base;
+  const skills = derivedSkills(level);
+  const autoOpening = autoReelSpeedFromItems(items, skills, 1);
+  const autoAverage = autoReelSpeedFromItems(items, skills, REELING_AUTO_SPEED_AVERAGE_STAMINA_RATIO);
+  const autoTired = autoReelSpeedFromItems(items, skills, 0.15);
   const dynamic = [
     Math.min(1.2, maxSpeed * 0.45),
-    maxSpeed * 0.62,
-    Math.min(2, maxSpeed),
+    autoOpening,
+    autoAverage,
+    autoTired,
     maxSpeed * 0.82,
     maxSpeed,
   ].map((speed) => roundNumber(clamp(speed, 0.15, maxSpeed), 2));

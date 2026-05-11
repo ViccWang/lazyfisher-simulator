@@ -369,8 +369,26 @@ const tunedFastMatch = bestControlsForLoadout(
   currentGroundbaitConfig(fastMatchLoadout, lanchaoBoatRegion),
 );
 assert(
-  tunedFastMatch.controls.reelSpeed > 1.25,
-  `高速度鱼轮自动调参不应仍固定在保守 1.25，当前=${tunedFastMatch.controls.reelSpeed}`,
+  tunedFastMatch.controls.reelSpeed >= 5,
+  `高速度鱼轮自动调参应尝试并采纳高速轮收益更高的收线档，当前=${tunedFastMatch.controls.reelSpeed}`,
+);
+let explicitBestFastMatch = null;
+for (const controls of controlVariants("match_rod", lanchaoBoatRegion, fastMatchLoadout, 53)) {
+  const trial = scoreRecommendation(
+    fastMatchLoadout,
+    controls,
+    lanchaoBoatRegion,
+    getWeather(lanchaoBoatRegion),
+    53,
+    8,
+    currentGroundbaitConfig(fastMatchLoadout, lanchaoBoatRegion),
+  );
+  if (trial && (!explicitBestFastMatch || trial.score > explicitBestFastMatch.score)) explicitBestFastMatch = trial;
+}
+assert.deepStrictEqual(
+  tunedFastMatch.controls,
+  explicitBestFastMatch.controls,
+  "自动调参给出的抛距、漂长、摩擦片、收线、切线阈值应等于完整候选评分中的最优结果",
 );
 
 const seamountRegion = byId(DATA.regions, "seamount_edge");
