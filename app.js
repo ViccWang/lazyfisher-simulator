@@ -2020,19 +2020,20 @@ function controlVariants(rodType, region, loadout) {
     ].map((depth) => Math.round(clamp(depth, 35, 3000) / 10) * 10));
     const casts = uniqueNumbers([0, castOffset + 5, castOffset + 8, region.depthMin + 7].map((distance) => roundNumber(Math.max(0, distance), 1)));
     const drags = dragRatioCandidates(rodType, loadout, [0.42, 0.5, 0.7, 0.85, 0.95]);
-    const variants = depths.flatMap((floatLengthCm) => casts.flatMap((throwDistance) => drags.map((dragRatio) => ({
+    const speeds = reelSpeedCandidates(rodType, loadout, [1.25]);
+    const variants = depths.flatMap((floatLengthCm) => casts.flatMap((throwDistance) => speeds.flatMap((reelSpeed) => drags.map((dragRatio) => ({
       ...base,
       throwDistance,
       floatLengthCm,
       dragRatio,
-      reelSpeed: rodType === "hand_rod" ? 0 : 1.25,
-    }))));
+      reelSpeed,
+    })))));
     return expandLineCutRoundVariants(variants, rodType);
   }
   if (rodType === "bottom_rod") {
     const casts = uniqueNumbers([0, 0.9 * region.depthMax + 4, 1.35 * region.depthMax + 4, 1.8 * region.depthMax + 4].map((distance) => roundNumber(Math.max(0, distance), 1)));
     const drags = dragRatioCandidates(rodType, loadout, [0.42, 0.55, 0.7, 0.85, 0.95]);
-    const speeds = [0.6, 0.8, 1, 1.2];
+    const speeds = reelSpeedCandidates(rodType, loadout, [0.6, 0.8, 1, 1.2]);
     const variants = casts.flatMap((throwDistance) => drags.flatMap((dragRatio) => speeds.map((reelSpeed) => ({
       ...base,
       throwDistance,
@@ -2044,7 +2045,7 @@ function controlVariants(rodType, region, loadout) {
   const lureItem = byId(DATA.lures, loadout.lure);
   const actions = ["auto", "steady_surface", "steady_mid", "bottom_hop", "mid_twitch"];
   const casts = uniqueNumbers([0, castOffset + 3, castOffset + 8, 1.2 * region.depthMax + 4].map((distance) => roundNumber(Math.max(0, distance), 1)));
-  const speeds = uniqueNumbers([lureItem?.lureType === "jig" ? 0.85 : 1.35, 0.85, 1.35, 1.45]);
+  const speeds = reelSpeedCandidates(rodType, loadout, [lureItem?.lureType === "jig" ? 0.85 : 1.35, 0.85, 1.35, 1.45]);
   const drags = dragRatioCandidates(rodType, loadout, [0.45, 0.7, 0.85, 0.95]);
   const variants = casts.flatMap((throwDistance) => actions.flatMap((lureAction) => speeds.flatMap((reelSpeed) => drags.map((dragRatio) => ({
     ...base,
@@ -2054,6 +2055,24 @@ function controlVariants(rodType, region, loadout) {
     reelSpeed,
   })))));
   return expandLineCutRoundVariants(variants, rodType);
+}
+
+function reelSpeedCandidates(rodType, loadout, fallback) {
+  if (rodType === "hand_rod") return [0];
+  const items = getLoadoutItems(loadout);
+  const maxSpeed = Number(items.reel?.speedMax);
+  const base = uniqueNumbers(fallback).filter((speed) => speed > 0);
+  if (!Number.isFinite(maxSpeed) || maxSpeed <= 0) return base;
+  const dynamic = [
+    Math.min(1.2, maxSpeed * 0.45),
+    maxSpeed * 0.62,
+    Math.min(2, maxSpeed),
+    maxSpeed * 0.82,
+    maxSpeed,
+  ].map((speed) => roundNumber(clamp(speed, 0.15, maxSpeed), 2));
+  return uniqueNumbers([...base, ...dynamic])
+    .filter((speed) => speed <= maxSpeed + 1e-9)
+    .sort((a, b) => a - b);
 }
 
 function dragRatioCandidates(rodType, loadout, fallback) {

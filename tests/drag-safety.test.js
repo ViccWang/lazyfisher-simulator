@@ -341,6 +341,38 @@ assert.doesNotThrow(() => {
   assert(randomSimulation?.stats, "随机模拟应该返回统计结果");
 }, "点击开始模拟对应的随机模拟不应该抛错");
 
+const fastMatchLoadout = {
+  rod: "aqualis_mr570_celestial_match",
+  reel: "marineredge_me14000b_bluecurrent",
+  line: "fluorocore_fc36_main",
+  leader: "stealthplus_sp22_leader",
+  hook: "marineredge_bg37_trench_8_0",
+  bait: "small_fish_whole_bait_170",
+  float: "marshfloat_mf16",
+};
+const fastMatchSpeedCandidates = controlVariants("match_rod", lanchaoBoatRegion, fastMatchLoadout).map((controls) => controls.reelSpeed);
+assert(
+  fastMatchSpeedCandidates.some((speed) => speed > 1.25),
+  `自动调参应该按鱼轮 speed_max 生成更高收线候选，当前候选=${Array.from(new Set(fastMatchSpeedCandidates)).join(",")}`,
+);
+assert(
+  fastMatchSpeedCandidates.every((speed) => speed <= 6.1),
+  `自动调参生成的收线速度不应超过当前鱼轮 speed_max=6.1，当前候选=${Array.from(new Set(fastMatchSpeedCandidates)).join(",")}`,
+);
+const tunedFastMatch = bestControlsForLoadout(
+  fastMatchLoadout,
+  "match_rod",
+  lanchaoBoatRegion,
+  getWeather(lanchaoBoatRegion),
+  53,
+  8,
+  currentGroundbaitConfig(fastMatchLoadout, lanchaoBoatRegion),
+);
+assert(
+  tunedFastMatch.controls.reelSpeed > 1.25,
+  `高速度鱼轮自动调参不应仍固定在保守 1.25，当前=${tunedFastMatch.controls.reelSpeed}`,
+);
+
 const seamountRegion = byId(DATA.regions, "seamount_edge");
 const seamountGroundbait = { enabled: true, mode: "auto", baitType: "", amount: 3000 };
 const weakMatchLoadout = {
