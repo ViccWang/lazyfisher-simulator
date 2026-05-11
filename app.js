@@ -20,7 +20,7 @@ const LURE_ACTION_LABELS = {
 };
 
 const AVERAGE_TIME_MATCH_CACHE = new Map();
-const FORMULA_LAST_UPDATED = "2026-05-09 21:02";
+const FORMULA_LAST_UPDATED = "2026-05-11 12:19";
 const REGION_NOTICE_MULTIPLIER_OVERRIDES = Object.freeze({
   seamount_edge: 2.1,
   stormline_reef: 2,
@@ -76,12 +76,12 @@ const RATING_MULTIPLIERS = Object.freeze({
   legendary: 10,
 });
 const FISH_VALUE_PER_KG_BY_RARITY = Object.freeze({
-  common: 8,
-  uncommon: 14,
-  rare: 42,
-  epic: 90,
-  legendary: 185,
-  mythic: 280,
+  common: 7,
+  uncommon: 12,
+  rare: 36,
+  epic: 76,
+  legendary: 155,
+  mythic: 235,
 });
 const FISH_VALUE_SIZE_FACTOR_EXPONENT = 0.12;
 const FISH_VALUE_SIZE_FACTOR_MIN = 0.8;
@@ -171,6 +171,7 @@ function simulatorVirtualRegions(raw) {
 
 function normalizeRegion(item) {
   const env = item.environment_baseline || {};
+  const boatTrip = item.boat_trip || {};
   const spots = (item.spots || []).map(normalizeSpot).filter((spot) => spot.id && spot.name);
   return {
     id: item.id,
@@ -184,7 +185,11 @@ function normalizeRegion(item) {
     waterType: item.water_type || "freshwater",
     castOffset: item.cast_expectation_offset ?? 0,
     noticeMultiplier: REGION_NOTICE_MULTIPLIER_OVERRIDES[item.id] ?? item.notice_multiplier ?? 1,
+    sceneMultiplier: boatTrip.encounter_multiplier ?? item.encounter_multiplier ?? item.scene_multiplier ?? 1,
     softLimitKg: item.soft_limit_kg ?? null,
+    weightMinOverride: boatTrip.weight_min_kg_override ?? item.weight_min_kg_override ?? null,
+    weightMaxOverride: boatTrip.weight_max_kg_override ?? item.weight_max_kg_override ?? null,
+    boatBasePrice: boatTrip.base_price ?? 0,
     simulatorVirtual: item.simulator_virtual || null,
     recommendedStyles: item.recommended_styles || [],
     spots: spots.length ? spots : [defaultSpot()],
@@ -988,6 +993,7 @@ function buildPresentation(loadout, controls, region, env, level) {
 
   return {
     items,
+    region,
     rodType,
     spot,
     castExpectationOffset,
@@ -1350,7 +1356,7 @@ function expectedReelingOutcome(presentation, fishObj, poolEntry, env) {
   for (let i = 1; i <= EXPECTED_REELING_SAMPLE_COUNT; i += 1) {
     const skew = haltonNormalish(i);
     for (const sampleSkew of [shift + skew, shift - skew]) {
-      const sampleWeight = catchWeightFromSkew(fishObj, sampleSkew);
+      const sampleWeight = catchWeightFromSkew(fishObj, sampleSkew, 0, 0, presentation.region);
       const outcome = reelingOutcomeProfile(presentation, fishObj, poolEntry, env, sampleWeight);
       totals.reelingSuccess += outcome.reelingSuccess;
       totals.breakChance += outcome.breakChance;
@@ -1380,7 +1386,7 @@ function expectedReelingOutcome(presentation, fishObj, poolEntry, env) {
 function canUseCentralReelingOutcome(presentation, fishObj, poolEntry, central) {
   if (central.breakChance > 0.01 || central.dragTension > central.weakTension * 0.92) return false;
   const shift = catchSizeShift(poolEntry);
-  const upperWeight = catchWeightFromSkew(fishObj, shift + 2.4);
+  const upperWeight = catchWeightFromSkew(fishObj, shift + 2.4, 0, 0, presentation.region);
   const upperLoad = fishRawTensionEstimate(fishObj, upperWeight);
   if (upperLoad > central.weakTension * 0.92) return false;
   if (presentation.items.reel && upperLoad > Math.max(central.dragTension, 0.1)) {
@@ -1391,7 +1397,7 @@ function canUseCentralReelingOutcome(presentation, fishObj, poolEntry, central) 
 
 function reelingOutcomeProfile(presentation, fishObj, poolEntry, env, actualWeight = null) {
   const items = presentation.items;
-  const initialWeight = Number.isFinite(actualWeight) && actualWeight > 0 ? actualWeight : fishInitialMassEstimate(fishObj, poolEntry);
+  const initialWeight = Number.isFinite(actualWeight) && actualWeight > 0 ? actualWeight : fishInitialMassEstimate(fishObj, poolEntry, presentation.region);
   const pressure = highReelPressure(presentation);
   const fishLoad = fishRawTensionEstimate(fishObj, initialWeight) * (1 + REELING_HIGH_REEL_TENSION_MULTIPLIER * pressure);
   const safety = tackleSafetyProfile(items, presentation.controls);
@@ -1512,11 +1518,17 @@ function lineLockedOverloadRisk(presentation, fishObj, weight, fishLoad, safety)
 }
 
 function highReelPressure(presentation) {
-  const speed = Math.max(0, Number(presentation?.controls?.reelSpeed) || 0);
+  const speed = actualReelSpeed(presentation);
   return clamp(
     (speed - REELING_HIGH_REEL_PRESSURE_SPEED_START_MPS) /
       Math.max(0.1, REELING_HIGH_REEL_PRESSURE_SPEED_FULL_MPS - REELING_HIGH_REEL_PRESSURE_SPEED_START_MPS),
   );
+}
+
+function actualReelSpeed(presentation) {
+  const configured = Math.max(0, Number(presentation?.controls?.reelSpeed) || 0);
+  const maxSpeed = Number(presentation?.items?.reel?.speedMax);
+  return Number.isFinite(maxSpeed) && maxSpeed > 0 ? Math.min(configured, maxSpeed) : configured;
 }
 
 function heavyFishRetrieveResistanceFactor(weight, sprinting = false) {
@@ -1555,13 +1567,13 @@ function estimatedBiteWindowSeconds(presentation) {
 }
 
 function estimatedReelingSeconds(presentation, fishObj, poolEntry, evals = null) {
-  const initialWeight = fishInitialMassEstimate(fishObj, poolEntry);
+  const initialWeight = fishInitialMassEstimate(fishObj, poolEntry, presentation.region);
   return estimatedReelingSecondsForWeight(presentation, fishObj, poolEntry, initialWeight, evals);
 }
 
 function estimatedReelingSecondsForWeight(presentation, fishObj, poolEntry, initialWeight, evals = null) {
   const lineOut = initialLineOutMeters(presentation);
-  const reelSpeed = Math.max(0.15, Number(presentation?.controls?.reelSpeed) || 0.8);
+  const reelSpeed = Math.max(0.15, actualReelSpeed(presentation) || 0.8);
   const pressure = highReelPressure(presentation);
   const heavyRetrieveFactor = heavyFishRetrieveResistanceFactor(initialWeight, pressure > 0.45);
   const reelControlFactor = presentation?.items?.reel ? clamp(presentation.items.reel.controlFactor ?? presentation.reelControlFactor ?? 1, 0.75, 1.25) : 1;
@@ -1592,11 +1604,11 @@ function initialLineOutMeters(presentation) {
   return Math.min(lineLength, Math.max(1, Math.sqrt(cast ** 2 + depth ** 2) + 0.35 * rodLength));
 }
 
-function fishInitialMassEstimate(fishObj, poolEntry) {
+function fishInitialMassEstimate(fishObj, poolEntry, region = null) {
   const minWeight = Math.max(0, Number(fishObj?.weightMin) || 0);
   const maxWeight = Math.max(minWeight, Number(fishObj?.weightMax) || minWeight);
   const sizeModifier = poolEntry?.sizeModifier ?? 1;
-  return (0.35 * minWeight + 0.65 * maxWeight) * sizeModifier;
+  return applyRegionWeightLimits((0.35 * minWeight + 0.65 * maxWeight) * sizeModifier, region);
 }
 
 function reelingFishStaminaMax(fishObj, initialWeight, weightCoefficient = REELING_FISH_STAMINA_WEIGHT_COEFFICIENT) {
@@ -1654,7 +1666,8 @@ function candidateWeights(presentation, region, env, level) {
   if (!total) return { encounterRate: 0, entries: [] };
   const averageDist = base.reduce((sum, row) => sum + row.weight * row.dist.redistribution, 0) / Math.max(total, 1e-6);
   const regionBonus = 1 + 0.25 * clamp(Number(els.proficiency.value) / 100);
-  const encounterRate = clamp(0.35 * ENCOUNTER_FISHING_INTERVAL_BITE_RATE_MULTIPLIER * regionBonus * total);
+  const sceneMultiplier = Math.max(0, Number(region.sceneMultiplier) || 1);
+  const encounterRate = clamp(0.35 * ENCOUNTER_FISHING_INTERVAL_BITE_RATE_MULTIPLIER * sceneMultiplier * regionBonus * total);
   const adjusted = base.map((row) => ({
     ...row,
     adjustedWeight: row.weight * clamp(1 + 0.9 * (row.dist.redistribution - averageDist), 0.82, 1.18),
@@ -1678,6 +1691,8 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
   let escapePerTick = 0;
   let lineCutPerTick = 0;
   let busySecondsPerTick = 0;
+  let lineLockWeightedRisk = 0;
+  let lineLockRiskWeight = 0;
   const fishRows = [];
   const breakParts = new Map();
 
@@ -1692,12 +1707,27 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     const pCatch = pHook * evals.reelingSuccess * (1 - (evals.lineCutChance ?? 0)) * (1 - 0.22 * presentation.snagRate);
     const pBreak = pHook * evals.breakChance;
     const pEscape = pHook * evals.escapeChance;
+    const weakTension = Math.max(evals.reelingRisk.weakTension ?? presentation.tackleSafety.weakTension, 0.1);
+    const tailWeight = catchWeightFromSkew(row.fish, catchSizeShift(row.entry) + 2.4, 0, 0, region);
+    const tailRawTension = fishRawTensionEstimate(row.fish, tailWeight) * (1 + REELING_HIGH_REEL_TENSION_MULTIPLIER * highReelPressure(presentation));
+    const lockSafety = {
+      ...presentation.tackleSafety,
+      weakTension,
+      dragTension: evals.reelingRisk.dragTension ?? presentation.tackleSafety.dragTension,
+    };
+    const centralLineLockRisk = evals.reelingRisk.lockedLineRisk ?? 0;
+    const tailLineLockRisk = tailRawTension > Math.max(lockSafety.dragTension, 0.1)
+      ? lineLockedOverloadRisk(presentation, row.fish, tailWeight, tailRawTension, lockSafety)
+      : 0;
+    const lineLockRisk = clamp(Math.max(centralLineLockRisk, tailRawTension > weakTension ? tailLineLockRisk : 0));
     catchPerTick += pCatch;
     bitePerTick += pBite;
     noticePerTick += pNotice;
     breakPerTick += pBreak;
     escapePerTick += pEscape;
     lineCutPerTick += pLineCut;
+    lineLockWeightedRisk += pHook * lineLockRisk;
+    lineLockRiskWeight += pHook;
     if (evals.reelingRisk.breakPart && pBreak > 0) {
       breakParts.set(evals.reelingRisk.breakPart, (breakParts.get(evals.reelingRisk.breakPart) || 0) + pBreak);
     }
@@ -1708,6 +1738,9 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     fishRows.push({
       fish: row.fish,
       entry: row.entry,
+      region,
+      lineLockRisk,
+      dragRelianceRisk: lineLockRisk,
       catch: pCatch,
       equipmentBreak: pBreak,
       escape: pEscape,
@@ -1758,6 +1791,8 @@ function estimateLoadout(loadout, controls, region, env, level, hours, waitMulti
     busySecondsPerTick,
     falseSignalRate,
     snagEvents,
+    lineLockRisk: lineLockWeightedRisk / Math.max(lineLockRiskWeight, 1e-6),
+    dragRelianceRisk: lineLockWeightedRisk / Math.max(lineLockRiskWeight, 1e-6),
     fishRows: sortedFishRows,
     weightStats: estimateWeightStatsFromRows(sortedFishRows, hours),
   };
@@ -1877,7 +1912,8 @@ function riskAdjustedWeightScore(estimate, hours) {
     estimate.snagEvents / safeHours * 0.08 +
     estimate.falseSignalRate * 0.22 +
     estimate.equipmentBreaks / safeHours * 0.22 +
-    estimate.escapeEvents / safeHours * 0.035;
+    estimate.escapeEvents / safeHours * 0.035 +
+    (estimate.lineLockRisk ?? estimate.dragRelianceRisk ?? 0) * 1.35;
   return weightStats.scorePerHour * (1 - clamp(riskPenalty, 0, 0.65));
 }
 
@@ -2044,6 +2080,7 @@ function uniqueNumbers(values) {
 }
 
 function renderRecommendations() {
+  cancelAutoTuneTimer();
   const recs = generateRecommendations();
   els.recommendMeta.textContent = `${recs.length} 个方案`;
   if (!recs.length) {
@@ -2224,8 +2261,7 @@ function applyImportedLoadout(payload) {
   syncControlsToInputs();
   renderTabs();
   renderManualFields();
-  renderRecommendations();
-  runSimulation(false);
+  markResultsStale("已导入装备数据。点击“开始模拟”重新计算结果。");
 
   return {
     appliedCount,
@@ -2392,7 +2428,7 @@ function simulate(loadout, controls, region, env, level, hours, groundbaitConfig
       waitSeconds = 0;
       if (Math.random() < evals.hookRate) {
         elapsedSeconds += estimatedReelingSeconds(presentation, row.fish, row.entry, evals);
-        const catchInfo = rollCatch(row.fish, row.entry);
+        const catchInfo = rollCatch(row.fish, row.entry, region);
         const outcome = reelingOutcomeProfile(presentation, row.fish, row.entry, env, catchInfo.weight);
         const outcomeRoll = Math.random();
         if (outcomeRoll < (outcome.lineCutChance ?? 0)) {
@@ -2439,13 +2475,14 @@ function roulette(rows, getWeight) {
   return rows[rows.length - 1] || null;
 }
 
-function rollCatch(fishObj, poolEntry) {
+function rollCatch(fishObj, poolEntry, region = null) {
   const latent = normalish();
   const weight = catchWeightFromSkew(
     fishObj,
     latent + catchSizeShift(poolEntry),
     gaussianNoise(0.035),
     gaussianNoise(0.05),
+    region,
   );
   const rating = ratingFromRoll(normalCdf(latent));
   const multiplier = RATING_MULTIPLIERS[rating] ?? 1;
@@ -2466,11 +2503,25 @@ function catchSizeShift(poolEntry) {
   return 1.8 * ((poolEntry?.sizeModifier ?? 1) - 1);
 }
 
-function catchWeightFromSkew(fishObj, skew, sizeNoise = 0, densityNoise = 0) {
+function catchWeightFromSkew(fishObj, skew, sizeNoise = 0, densityNoise = 0, region = null) {
   const sizeRatio = clamp(CATCH_SIZE_RATIO_BASE + CATCH_SIZE_RATIO_LATENT_SCALE * skew + sizeNoise, 0.03, 0.998);
   const density = clamp(CATCH_DENSITY_BASE + CATCH_DENSITY_LATENT_SCALE * skew + densityNoise, 0.55, 1.35);
   const weightRatio = clamp((sizeRatio ** FISH_WEIGHT_RATIO_SIZE_EXPONENT) * density, 0.02, 1);
-  return lerp(fishObj.weightMin, fishObj.weightMax, weightRatio);
+  return applyRegionWeightLimits(lerp(fishObj.weightMin, fishObj.weightMax, weightRatio), region);
+}
+
+function applyRegionWeightLimits(weight, region = null) {
+  let limited = Math.max(0, Number(weight) || 0);
+  const softLimit = Number(region?.softLimitKg);
+  if (Number.isFinite(softLimit) && softLimit > 0 && limited > softLimit) {
+    const overflow = limited - softLimit;
+    limited = softLimit + (softLimit * overflow) / (softLimit + overflow);
+  }
+  const maxOverride = Number(region?.weightMaxOverride);
+  if (Number.isFinite(maxOverride) && maxOverride > 0) limited = Math.min(limited, maxOverride);
+  const minOverride = Number(region?.weightMinOverride);
+  if (Number.isFinite(minOverride) && minOverride > 0) limited = Math.max(limited, minOverride);
+  return limited;
 }
 
 function ratingFromRoll(u) {
@@ -2493,6 +2544,9 @@ function lerp(a, b, t) {
 }
 
 function runSimulation(useRandom = true) {
+  cancelSimulationTimer();
+  cancelAutoTuneTimer();
+  cancelMapRevenueRanking();
   state.controls = getControls();
   const region = getRegion();
   const env = getWeather(region);
@@ -2523,6 +2577,21 @@ function scheduleAutoTuneAndSimulation({ recommendations = false } = {}) {
   }, AUTO_TUNE_DEBOUNCE_MS);
 }
 
+function scheduleAutoTuneOnly({ recommendations = true } = {}) {
+  if (autoTuneTimer) clearTimeout(autoTuneTimer);
+  cancelSimulationTimer();
+  cancelMapRevenueRanking();
+  els.subtitle.textContent = "正在自动调校参数...";
+  autoTuneTimer = deferTask(() => {
+    autoTuneTimer = null;
+    tuneControlsForCurrentLoadout();
+    markResultsStale("装备已变更，参数已自动调校。点击“开始模拟”重新计算结果。", {
+      recommendations,
+      cancelAutoTune: false,
+    });
+  }, AUTO_TUNE_DEBOUNCE_MS);
+}
+
 function scheduleRenderRecommendations(delay = RECOMMENDATION_DEBOUNCE_MS) {
   if (recommendationTimer) clearTimeout(recommendationTimer);
   els.recommendMeta.textContent = "等待重算";
@@ -2530,6 +2599,39 @@ function scheduleRenderRecommendations(delay = RECOMMENDATION_DEBOUNCE_MS) {
     recommendationTimer = null;
     renderRecommendations();
   }, delay);
+}
+
+function cancelSimulationTimer() {
+  if (!simulationTimer) return;
+  clearTimeout(simulationTimer);
+  simulationTimer = null;
+}
+
+function cancelRecommendationTimer() {
+  if (!recommendationTimer) return;
+  clearTimeout(recommendationTimer);
+  recommendationTimer = null;
+}
+
+function cancelAutoTuneTimer() {
+  if (!autoTuneTimer) return;
+  clearTimeout(autoTuneTimer);
+  autoTuneTimer = null;
+}
+
+function markRecommendationsStale(label = "条件已变更") {
+  cancelRecommendationTimer();
+  els.recommendMeta.textContent = label;
+}
+
+function markResultsStale(message = "条件已变更。点击“开始模拟”重新计算结果。", options = {}) {
+  const { recommendations = true, cancelAutoTune = true } = options;
+  cancelSimulationTimer();
+  if (cancelAutoTune) cancelAutoTuneTimer();
+  cancelMapRevenueRanking();
+  els.subtitle.textContent = message;
+  els.mapRevenue.innerHTML = "";
+  if (recommendations) markRecommendationsStale();
 }
 
 function deferTask(callback, delay) {
@@ -2599,7 +2701,7 @@ function tensionPartLabel(part) {
 }
 
 function estimateSaleValue(estimate) {
-  return estimate.fishRows.reduce((sum, row) => sum + row.catch * expectedCatchValue(row.fish, row.entry), 0);
+  return estimate.fishRows.reduce((sum, row) => sum + row.catch * expectedCatchValue(row.fish, row.entry, row.region), 0);
 }
 
 function estimateWeightStats(estimate, hours = 1) {
@@ -2681,7 +2783,7 @@ function rowExpectedTotalWeight(row) {
 
 function rowExpectedWeight(row) {
   if (!row?.fish) return 0;
-  return expectedCatchWeight(row.fish, row.entry);
+  return expectedCatchWeight(row.fish, row.entry, row.region);
 }
 
 function heavyFishThreshold(rows, averageWeightKg) {
@@ -2703,17 +2805,17 @@ function weightedWeightPercentile(rows, percentile) {
   return sorted[sorted.length - 1]?.expectedWeightKg ?? 0;
 }
 
-function expectedCatchValue(fishObj, poolEntry) {
-  return fishObj.baseValue * expectedCatchWeight(fishObj, poolEntry) * EXPECTED_RATING_MULTIPLIER;
+function expectedCatchValue(fishObj, poolEntry, region = null) {
+  return fishObj.baseValue * expectedCatchWeight(fishObj, poolEntry, region) * EXPECTED_RATING_MULTIPLIER;
 }
 
-function expectedCatchWeight(fishObj, poolEntry) {
+function expectedCatchWeight(fishObj, poolEntry, region = null) {
   const shift = catchSizeShift(poolEntry);
   let total = 0;
   for (let i = 1; i <= EXPECTED_WEIGHT_SAMPLE_COUNT; i += 1) {
     const skew = haltonNormalish(i);
-    total += catchWeightFromSkew(fishObj, shift + skew);
-    total += catchWeightFromSkew(fishObj, shift - skew);
+    total += catchWeightFromSkew(fishObj, shift + skew, 0, 0, region);
+    total += catchWeightFromSkew(fishObj, shift - skew, 0, 0, region);
   }
   return total / (EXPECTED_WEIGHT_SAMPLE_COUNT * 2);
 }
@@ -2917,19 +3019,20 @@ function init() {
   bindEvents();
   updateTimeOutput();
   runSimulation(false);
-  scheduleRenderRecommendations();
+  els.recommendMeta.textContent = "点击计算";
+  els.recommendations.innerHTML = `<div class="empty-state">点击“推荐方案”后计算当前条件下的装备方案。</div>`;
 }
 
 function bindEvents() {
   els.time.addEventListener("input", () => {
     updateTimeOutput();
-    scheduleRunSimulation(false);
+    markResultsStale();
   });
   els.drag.addEventListener("input", () => {
     els.dragOutput.textContent = Number(els.drag.value).toFixed(2);
-    scheduleRunSimulation(false);
+    markResultsStale("参数已变更。点击“开始模拟”重新计算结果。", { recommendations: false });
   });
-  els.recommendBtn.addEventListener("click", renderRecommendations);
+  els.recommendBtn.addEventListener("click", () => scheduleRenderRecommendations(0));
   els.simulateBtn.addEventListener("click", () => runSimulation(true));
   els.importLoadout.addEventListener("click", importLoadoutText);
   els.exportLoadout.addEventListener("click", exportLoadoutText);
@@ -2937,30 +3040,27 @@ function bindEvents() {
   els.resetControls.addEventListener("click", () => {
     state.controls = defaultControls();
     syncControlsToInputs();
-    scheduleRunSimulation(false);
+    markResultsStale("参数已重置。点击“开始模拟”重新计算结果。", { recommendations: false });
   });
   for (const el of [els.region, els.spot, els.level, els.hours, els.proficiency, els.strengthSkill, els.enduranceSkill, els.experienceSkill, els.techniqueSkill, els.weather]) {
     el.addEventListener("change", () => {
       if (el === els.region) renderSpotOptions();
       if (el === els.region) updateGroundbaitControls();
-      normalizeLoadout(state.rodType);
-      renderManualFields();
-      if (el === els.region || el === els.spot || el === els.level) {
-        scheduleAutoTuneAndSimulation({ recommendations: true });
-      } else {
-        scheduleRenderRecommendations();
-        scheduleRunSimulation(false);
+      if (el === els.level) {
+        normalizeLoadout(state.rodType);
+        renderManualFields();
       }
+      markResultsStale("基础条件已变更。点击“开始模拟”或“推荐方案”重新计算。");
     });
   }
   for (const el of [els.groundbaitMode, els.groundbaitType, els.groundbaitAmount]) {
     el.addEventListener("change", () => {
       updateGroundbaitControls();
-      scheduleAutoTuneAndSimulation({ recommendations: true });
+      markResultsStale("打窝条件已变更。点击“开始模拟”或“推荐方案”重新计算。");
     });
   }
   for (const el of [els.cast, els.float, els.drag, els.reelSpeed, els.lureAction, els.lineCutRound, els.lineCut]) {
-    el.addEventListener("change", () => scheduleRunSimulation(false));
+    el.addEventListener("change", () => markResultsStale("参数已变更。点击“开始模拟”重新计算结果。", { recommendations: false }));
   }
   document.querySelectorAll(".loadout-tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -2968,7 +3068,7 @@ function bindEvents() {
       normalizeLoadout(state.rodType);
       renderTabs();
       renderManualFields();
-      scheduleAutoTuneAndSimulation();
+      scheduleAutoTuneOnly();
     });
   });
   els.manualFields.addEventListener("change", (event) => {
@@ -2982,7 +3082,7 @@ function bindEvents() {
       renderTabs();
       renderManualFields();
     }
-    scheduleAutoTuneAndSimulation();
+    scheduleAutoTuneOnly();
   });
 }
 
